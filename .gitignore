@@ -2,6 +2,9 @@
 *.exe
 blood-pressure-bot
 
+# БД
+ data/sqlite/storage.db
+
 # Временные файлы
 *.test
 *.out

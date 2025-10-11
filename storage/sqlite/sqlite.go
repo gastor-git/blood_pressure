@@ -105,7 +105,7 @@ func (s *Storage) IsExists(ctx context.Context, Pressure *storage.Pressure) (boo
 }
 
 func (s *Storage) Init(ctx context.Context) error {
-	q := `CREATE TABLE IF NOT EXISTS blood_pressure (date TEXT, day_part TEXT, systolic TEXT, diastolic INTEGTEXTER, heart_rate TEXT, user_name TEXT)`
+	q := `CREATE TABLE IF NOT EXISTS blood_pressure (date TEXT, day_part TEXT, systolic TEXT, diastolic TEXT, heart_rate TEXT, user_name TEXT)`
 
 	_, err := s.db.ExecContext(ctx, q)
 	if err != nil {

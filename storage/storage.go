@@ -15,11 +15,6 @@ type Storage interface {
 var ErrNoSavedPages = errors.New("no saved pages")
 var ErrNoSavedPressure = errors.New("нет показаний за сегодня")
 
-type Page struct {
-	Url      string
-	UserName string
-}
-
 type Pressure struct {
 	Date      string
 	DayPart   string
