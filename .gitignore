@@ -1,0 +1,14 @@
+# Исполняемые файлы
+*.exe
+blood-pressure-bot
+
+# Временные файлы
+*.test
+*.out
+
+# Кэш
+pkg/mod
+
+# Директории IDE
+.idea/
+.vscode/
