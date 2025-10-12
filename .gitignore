@@ -1,9 +1,10 @@
 # Исполняемые файлы
 *.exe
 blood-pressure-bot
+.env
 
 # БД
- data/sqlite/storage.db
+ data/
 
 # Временные файлы
 *.test

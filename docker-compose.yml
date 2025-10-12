@@ -1,0 +1,8 @@
+services:
+  app:
+    container_name: blood_pressure
+    build: .
+    environment:
+      TG_KEY: ${TG_KEY}
+    volumes:
+      - ./data/sqlite/storage.db:/app/data/sqlite/storage.db

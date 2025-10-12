@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"flag"
 	"log"
+	"os"
 
 	tgClient "blood-pressure-bot/clients/telegram"
 	event_consumer "blood-pressure-bot/consumer/event-consumer"
@@ -42,17 +42,5 @@ func main() {
 }
 
 func mustToken() string {
-	token := flag.String(
-		"tg-bot-token",
-		"",
-		"token for access to telegram bot",
-	)
-
-	flag.Parse()
-
-	if *token == "" {
-		log.Fatal("token is not specified")
-	}
-
-	return *token
+	return os.Getenv("TG_KEY")
 }
