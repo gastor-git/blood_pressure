@@ -29,4 +29,4 @@ dc_down:
 ##################
 
 app_bash:
-	docker compose -f ./docker-compose.yml exec sh
+	docker compose -f ./docker-compose.yml exec /bin/bash

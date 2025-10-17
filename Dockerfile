@@ -1,6 +1,8 @@
-FROM golang:1.25
+FROM golang:1.25 AS builder
 
-WORKDIR /app
+RUN apt-get update && apt-get install -y tzdata
+
+WORKDIR /build
 
 COPY go.mod go.sum ./
 
@@ -8,6 +10,14 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -ldflags="-s -w" -a -o blood_pressure main.go
+RUN go build -tags netgo -ldflags '-s -w -extldflags "-static"' -o blood_pressure
+
+FROM scratch
+
+WORKDIR /app
+
+COPY --from=builder /build/blood_pressure .
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo/
 
 CMD ["./blood_pressure"]
