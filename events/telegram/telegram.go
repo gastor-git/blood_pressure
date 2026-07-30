@@ -9,8 +9,13 @@ import (
 	"blood-pressure-bot/storage"
 )
 
+type Client interface {
+	Updates(offset, limit int) ([]telegram.Update, error)
+	SendMessage(chatID int, text string) error
+}
+
 type Processor struct {
-	tg      *telegram.Client
+	tg      Client
 	offset  int
 	storage storage.Storage
 }
@@ -25,7 +30,7 @@ var (
 	ErrUnknownMetaType  = errors.New("unknown meta type")
 )
 
-func New(client *telegram.Client, storage storage.Storage) *Processor {
+func New(client Client, storage storage.Storage) *Processor {
 	return &Processor{
 		tg:      client,
 		storage: storage,

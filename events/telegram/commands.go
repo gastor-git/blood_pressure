@@ -50,16 +50,7 @@ func (p *Processor) savePressure(chatID int, text string, username string) (err 
 	}
 	now := time.Now().In(loc)
 
-	hour := now.Hour()
-	var datePart string
-
-	if hour > 0 && hour <= 12 {
-		datePart = "утро"
-	} else if hour <= 18 {
-		datePart = "день"
-	} else {
-		datePart = "вечер"
-	}
+	datePart := dayPart(now)
 
 	pressures := getPressures(text)
 
@@ -117,6 +108,18 @@ func (p *Processor) sendHelp(chatID int) error {
 
 func (p *Processor) sendHello(chatID int) error {
 	return p.tg.SendMessage(chatID, msgHello)
+}
+
+func dayPart(t time.Time) string {
+	hour := t.Hour()
+
+	if hour > 0 && hour <= 12 {
+		return "утро"
+	} else if hour <= 18 {
+		return "день"
+	}
+
+	return "вечер"
 }
 
 func isPressure(text string) bool {

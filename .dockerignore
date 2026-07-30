@@ -1,3 +1,15 @@
 .git
+.gitignore
+.vscode
 .env
-data
+
+data/
+logs/
+dist/
+build/
+bin/
+
+*.log
+*.exe
+*.local
+*.md
