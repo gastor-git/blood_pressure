@@ -31,10 +31,10 @@ dc_down:
 app_bash:
 	docker compose -f ./docker-compose.yml exec /bin/bash
 
-
 ##################
 # Tests
 ##################
 
 test:
 	go test ./... -count=1 -race -cover
+
