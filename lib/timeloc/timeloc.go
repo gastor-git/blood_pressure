@@ -9,6 +9,8 @@ const (
 	TimeZone = "Asia/Yekaterinburg"
 	// DateFormat — формат хранения и сравнения даты.
 	DateFormat = "2006-01-02"
+	// CSVDateFormat — формат даты в CSV-выгрузке /download.
+	CSVDateFormat = "02.01.2006"
 )
 
 // location загружается один раз при старте процесса.

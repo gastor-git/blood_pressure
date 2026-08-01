@@ -3,6 +3,7 @@ package telegram
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"blood-pressure-bot/lib/timeloc"
 	"blood-pressure-bot/storage"
@@ -34,7 +35,7 @@ func formatCSV(pressures []storage.Pressure) string {
 	b.WriteString("\r\n")
 
 	for _, date := range dates {
-		fields := []string{date}
+		fields := []string{formatCSVDate(date)}
 		for _, part := range csvOrder {
 			if p, ok := byDate[date][part]; ok {
 				fields = append(fields, p.Systolic, p.Diastolic, p.HeartRate)
@@ -47,6 +48,16 @@ func formatCSV(pressures []storage.Pressure) string {
 	}
 
 	return b.String()
+}
+
+// formatCSVDate приводит дату из формата хранения к виду DD.MM.YYYY.
+func formatCSVDate(date string) string {
+	t, err := time.Parse(timeloc.DateFormat, date)
+	if err != nil {
+		return date
+	}
+
+	return t.Format(timeloc.CSVDateFormat)
 }
 
 // csvFilename возвращает имя файла выгрузки; при пустом username — "user".
