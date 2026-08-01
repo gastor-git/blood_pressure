@@ -19,10 +19,15 @@ type Processor struct {
 	tg      Client
 	offset  int
 	storage storage.Storage
+	// claimed — пользователи, для которых ленивый backfill legacy-записей
+	// уже выполнен за время жизни процесса. Консьюмер однопоточный, поэтому
+	// мьютекс не нужен.
+	claimed map[int64]bool
 }
 
 type Meta struct {
 	ChatID   int
+	UserID   int64
 	Username string
 }
 
@@ -35,6 +40,7 @@ func New(client Client, storage storage.Storage) *Processor {
 	return &Processor{
 		tg:      client,
 		storage: storage,
+		claimed: make(map[int64]bool),
 	}
 }
 
@@ -74,7 +80,7 @@ func (p *Processor) processMessage(ctx context.Context, event events.Event) erro
 		return e.Wrap("can't process message", err)
 	}
 
-	if err := p.doCmd(ctx, event.Text, meta.ChatID, meta.Username); err != nil {
+	if err := p.doCmd(ctx, event.Text, meta.ChatID, meta.UserID, meta.Username); err != nil {
 		return e.Wrap("can't process message", err)
 	}
 
@@ -101,6 +107,7 @@ func event(upd telegram.Update) events.Event {
 	if updType == events.Message {
 		res.Meta = Meta{
 			ChatID:   upd.Message.Chat.ID,
+			UserID:   upd.Message.From.ID,
 			Username: upd.Message.From.Username,
 		}
 	}

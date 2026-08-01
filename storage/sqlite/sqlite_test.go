@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +45,7 @@ func TestInit_Idempotent(t *testing.T) {
 	}
 }
 
-func TestSave_IsExists(t *testing.T) {
+func TestSave_Duplicate(t *testing.T) {
 	s := newTestStorage(t)
 	ctx := context.Background()
 
@@ -56,41 +55,33 @@ func TestSave_IsExists(t *testing.T) {
 		Systolic:  "120",
 		Diastolic: "80",
 		HeartRate: "70",
+		UserID:    1,
 		UserName:  "user1",
 	}
 
-	if err := s.Save(ctx, p); err != nil {
+	saved, err := s.Save(ctx, p)
+	if err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
-
-	ok, err := s.IsExists(ctx, p)
-	if err != nil {
-		t.Fatalf("IsExists() failed: %v", err)
-	}
-	if !ok {
-		t.Error("IsExists() = false for saved record, want true")
+	if !saved {
+		t.Fatal("first Save() = false, want true")
 	}
 
-	// другой day_part → не существует
-	otherPart := *p
-	otherPart.DayPart = "вечер"
-	ok, err = s.IsExists(ctx, &otherPart)
+	// повторная запись за ту же часть суток — false, дубликат не создаётся
+	saved, err = s.Save(ctx, p)
 	if err != nil {
-		t.Fatalf("IsExists(other part) failed: %v", err)
+		t.Fatalf("second Save() failed: %v", err)
 	}
-	if ok {
-		t.Error("IsExists() = true for different day_part, want false")
+	if saved {
+		t.Error("second Save() = true, want false (duplicate)")
 	}
 
-	// другой user_name → не существует
-	otherUser := *p
-	otherUser.UserName = "user2"
-	ok, err = s.IsExists(ctx, &otherUser)
+	res, err := s.Show(ctx, 1)
 	if err != nil {
-		t.Fatalf("IsExists(other user) failed: %v", err)
+		t.Fatalf("Show() failed: %v", err)
 	}
-	if ok {
-		t.Error("IsExists() = true for different user_name, want false")
+	if len(res) != 1 {
+		t.Errorf("Show() returned %d rows, want 1", len(res))
 	}
 }
 
@@ -105,24 +96,57 @@ func TestShow_Today(t *testing.T) {
 		Systolic:  "120",
 		Diastolic: "80",
 		HeartRate: "70",
+		UserID:    1,
 		UserName:  "user1",
 	}
-	if err := s.Save(ctx, p); err != nil {
+	if _, err := s.Save(ctx, p); err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
 
-	msg, err := s.Show(ctx, "user1")
+	res, err := s.Show(ctx, 1)
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
 
-	want := "Дата: " + date + ", часть суток: утро, показания: 120/80/70\n\n"
-	if msg != want {
-		t.Errorf("Show() = %q, want %q", msg, want)
+	if len(res) != 1 {
+		t.Fatalf("Show() returned %d rows, want 1", len(res))
+	}
+	got := res[0]
+	if got.Date != date || got.DayPart != "утро" || got.Systolic != "120" || got.Diastolic != "80" || got.HeartRate != "70" {
+		t.Errorf("Show() = %+v, want date=%s day_part=утро 120/80/70", got, date)
+	}
+}
+
+func TestShow_ByUserID(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	// две записи с одинаковым (пустым) user_name, но разными user_id
+	p1 := &storage.Pressure{Date: date, DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1}
+	p2 := &storage.Pressure{Date: date, DayPart: "утро", Systolic: "130", Diastolic: "85", HeartRate: "75", UserID: 2}
+
+	if _, err := s.Save(ctx, p1); err != nil {
+		t.Fatalf("Save(p1) failed: %v", err)
+	}
+	if _, err := s.Save(ctx, p2); err != nil {
+		t.Fatalf("Save(p2) failed: %v", err)
 	}
 
-	if !strings.Contains(msg, "120/80/70") {
-		t.Errorf("Show() output missing readings: %q", msg)
+	res1, err := s.Show(ctx, 1)
+	if err != nil {
+		t.Fatalf("Show(1) failed: %v", err)
+	}
+	if len(res1) != 1 || res1[0].Systolic != "120" {
+		t.Errorf("Show(1) = %+v, want single record 120/...", res1)
+	}
+
+	res2, err := s.Show(ctx, 2)
+	if err != nil {
+		t.Fatalf("Show(2) failed: %v", err)
+	}
+	if len(res2) != 1 || res2[0].Systolic != "130" {
+		t.Errorf("Show(2) = %+v, want single record 130/...", res2)
 	}
 }
 
@@ -137,29 +161,197 @@ func TestShow_OtherDay(t *testing.T) {
 		Systolic:  "120",
 		Diastolic: "80",
 		HeartRate: "70",
+		UserID:    1,
 		UserName:  "user1",
 	}
-	if err := s.Save(ctx, p); err != nil {
+	if _, err := s.Save(ctx, p); err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
 
-	msg, err := s.Show(ctx, "user1")
+	res, err := s.Show(ctx, 1)
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
-	if msg != "" {
-		t.Errorf("Show() = %q, want empty string (record is from another day)", msg)
+	if len(res) != 0 {
+		t.Errorf("Show() = %+v, want empty (record is from another day)", res)
 	}
 }
 
 func TestShow_Empty(t *testing.T) {
 	s := newTestStorage(t)
 
-	msg, err := s.Show(context.Background(), "nobody")
+	res, err := s.Show(context.Background(), 999)
 	if err != nil {
-		t.Errorf("Show() error = %v, want nil (Show never returns ErrNoSavedPressure)", err)
+		t.Errorf("Show() error = %v, want nil", err)
 	}
-	if msg != "" {
-		t.Errorf("Show() = %q, want empty string", msg)
+	if len(res) != 0 {
+		t.Errorf("Show() = %+v, want empty slice", res)
 	}
+}
+
+func TestClaimLegacy(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	// legacy-строка без user_id
+	if err := insertLegacy(ctx, s, date, "утро", "120", "80", "70", "user1"); err != nil {
+		t.Fatalf("insertLegacy failed: %v", err)
+	}
+
+	// до привязки запись не видна по user_id
+	res, err := s.Show(ctx, 1)
+	if err != nil {
+		t.Fatalf("Show() failed: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("Show() before claim = %+v, want empty", res)
+	}
+
+	if err := s.ClaimLegacy(ctx, 1, "user1"); err != nil {
+		t.Fatalf("ClaimLegacy() failed: %v", err)
+	}
+
+	res, err = s.Show(ctx, 1)
+	if err != nil {
+		t.Fatalf("Show() after claim failed: %v", err)
+	}
+	if len(res) != 1 || res[0].Systolic != "120" {
+		t.Errorf("Show() after claim = %+v, want single record 120/...", res)
+	}
+}
+
+func TestClaimLegacy_OtherUserUntouched(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	if err := insertLegacy(ctx, s, date, "утро", "120", "80", "70", "user1"); err != nil {
+		t.Fatalf("insertLegacy(user1) failed: %v", err)
+	}
+	if err := insertLegacy(ctx, s, date, "утро", "130", "85", "75", "user2"); err != nil {
+		t.Fatalf("insertLegacy(user2) failed: %v", err)
+	}
+
+	// привязываем только user1
+	if err := s.ClaimLegacy(ctx, 1, "user1"); err != nil {
+		t.Fatalf("ClaimLegacy() failed: %v", err)
+	}
+
+	// user2 остался непривязанным — его запись не видна ни под чьим user_id
+	res, err := s.Show(ctx, 2)
+	if err != nil {
+		t.Fatalf("Show(2) failed: %v", err)
+	}
+	if len(res) != 0 {
+		t.Errorf("Show(2) = %+v, want empty (user2 not claimed)", res)
+	}
+}
+
+// insertLegacy вставляет запись без user_id (эмуляция старой строки).
+func insertLegacy(ctx context.Context, s *Storage, date, dayPart, sys, dia, hr, userName string) error {
+	q := `INSERT INTO blood_pressure (date, day_part, systolic, diastolic, heart_rate, user_name) VALUES (?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(ctx, q, date, dayPart, sys, dia, hr, userName)
+	return err
+}
+
+func TestMigrations_Idempotent(t *testing.T) {
+	s := newTestStorage(t) // первый Init внутри
+	ctx := context.Background()
+
+	if err := s.Init(ctx); err != nil {
+		t.Fatalf("second Init() failed: %v", err)
+	}
+
+	version, err := s.schemaVersion(ctx)
+	if err != nil {
+		t.Fatalf("schemaVersion() failed: %v", err)
+	}
+	if version != len(migrations) {
+		t.Errorf("schema version = %d, want %d", version, len(migrations))
+	}
+}
+
+func TestMigrations_FromLegacySchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Close() })
+
+	// эмуляция боевой БД: старая схема, user_version = 0
+	legacyDDL := `CREATE TABLE blood_pressure (date TEXT, day_part TEXT, systolic TEXT, diastolic TEXT, heart_rate TEXT, user_name TEXT)`
+	if _, err := s.db.ExecContext(ctx, legacyDDL); err != nil {
+		t.Fatalf("create legacy table failed: %v", err)
+	}
+	if err := insertLegacy(ctx, s, today(t), "утро", "120", "80", "70", "user1"); err != nil {
+		t.Fatalf("insertLegacy failed: %v", err)
+	}
+
+	if err := s.Init(ctx); err != nil {
+		t.Fatalf("Init() on legacy schema failed: %v", err)
+	}
+
+	// колонка user_id появилась
+	if !hasColumn(ctx, t, s, "blood_pressure", "user_id") {
+		t.Error("column user_id not created")
+	}
+	// индексы созданы
+	if !hasIndex(ctx, t, s, "idx_pressure_key") {
+		t.Error("index idx_pressure_key not created")
+	}
+	if !hasIndex(ctx, t, s, "idx_pressure_legacy") {
+		t.Error("index idx_pressure_legacy not created")
+	}
+
+	// legacy-строка сохранилась и переносится по user_name
+	if err := s.ClaimLegacy(ctx, 1, "user1"); err != nil {
+		t.Fatalf("ClaimLegacy() failed: %v", err)
+	}
+	res, err := s.Show(ctx, 1)
+	if err != nil {
+		t.Fatalf("Show() failed: %v", err)
+	}
+	if len(res) != 1 {
+		t.Errorf("Show() = %+v, want single migrated record", res)
+	}
+}
+
+func hasColumn(ctx context.Context, t *testing.T, s *Storage, table, column string) bool {
+	t.Helper()
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info failed: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dfltValue        any
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table_info failed: %v", err)
+		}
+		if name == column {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasIndex(ctx context.Context, t *testing.T, s *Storage, index string) bool {
+	t.Helper()
+	var name string
+	err := s.db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", index).Scan(&name)
+	if err != nil {
+		return false
+	}
+
+	return name == index
 }

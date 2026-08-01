@@ -1,283 +1,145 @@
-# План улучшения проекта `blood_pressure`
+# План: Этап 2 и Этап 3
 
-## Резюме
+Этап 1 выполнен. Ниже — только реализация Этапов 2 и 3.
 
-Код рабочий, но содержит **утечку секрета в логи**, **утечку медицинских данных между пользователями**, отсутствие таймаутов и полное игнорирование HTTP-кодов ответа. Плюс архитектурные нарушения (слой хранения формирует UI-текст) и мёртвый код.
+Нумерация пунктов (14, 15, 16, 18, 2, 11) соответствует исходному аудиту.
 
-Всего найдено 32 проблемы. Ниже — сгруппированные по приоритету.
+Общая верификация после каждого этапа: `go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`.
 
----
+Приняты решения:
 
-## P0 — Критично: безопасность и приватность
-
-### 1. Токен `TG_KEY` утекает в логи
-
-Токен вшит в path URL (`clients/telegram/telegram.go:34,77`). При любой сетевой ошибке `client.Do` возвращает `*url.Error`, чей `Error()` содержит полный URL **вместе с токеном**. Эта ошибка проходит цепочку `e.WrapIfErr` и печатается в `consumer/event-consumer/event-consumer.go:28` и `:52`.
-
-Достаточно одного разрыва соединения — токен в `docker compose logs`.
-
-**Фикс:** хранить токен в отдельном поле `Client.token`, а в `doRequest` при ошибке оборачивать в собственный тип ошибки с редактированным URL. Минимальный вариант — `strings.ReplaceAll(err.Error(), c.token, "***")` на границе клиента.
-
-### 2. Пользователи без `@username` делят одну запись
-
-`clients/telegram/types.go:19-21` парсит только `username`, а `from.id` — нет. Username в Telegram **опционален**. Все пользователи без него получают ключ `("", date, day_part)` → один видит показания другого через `/show`. Плюс username изменяем — смена ника отвязывает историю.
-
-**Фикс:** добавить `ID int64` в `From`, использовать его как ключ. Требует изменения схемы БД (колонка `user_id`) → нужно согласование, механизма миграций нет.
-
-### 3. HTTP-клиент без таймаута
-
-`clients/telegram/telegram.go:29` — `http.Client{}`. Бот однопоточный: зависший ответ вешает сервис навсегда.
-
-**Фикс:** `http.Client{Timeout: 30s}` + `http.NewRequestWithContext`, проброс `ctx` через `Updates`/`SendMessage` и интерфейс `events/telegram.Client`.
-
-### 4. Код ответа HTTP не проверяется, `Ok` игнорируется
-
-`resp.StatusCode` не читается нигде. Telegram отдаёт ошибки валидным JSON (`{"ok":false,"error_code":429,...}`), который успешно анмаршалится, `Result` остаётся `nil`, `Updates` возвращает `(nil, nil)` — **ошибка проглочена полностью**.
-
-**Фикс:** проверять `StatusCode`, парсить `error_code` / `description` / `parameters.retry_after`, возвращать типизированную ошибку.
-
-### 5. Пустой `TG_KEY` не детектируется
-
-`main.go:44-46` — `mustToken` ничего не «must». При пустом токене URL становится `/bot/getUpdates`, Telegram отдаёт 404, ошибка проглатывается (п. 4) → **бесконечный тихий цикл, ни одной строки в логе**. Бот выглядит живым.
-
-**Фикс:** `log.Fatal` при пустом токене.
-
-### 6. `pressures[0..2]` без проверки длины
-
-`events/telegram/commands.go:60-62` — `getPressures` возвращает `nil` при отсутствии совпадений. Защита только в виде неявного контракта с `isPressure` (`commands.go:26`). Любая правка регулярки → `panic: index out of range`.
-
-### 7. Нет `recover()` — одна паника валит весь сервис
-
-Нигде нет `defer recover()`, а в `docker-compose.yml` нет `restart:`. Паника от одного сообщения одного пользователя убивает бот для всех, навсегда.
-
-**Фикс:** `recover` в `handleEvents` вокруг `Process` + `restart: unless-stopped` в compose.
+- **dayPart** — код приводится к тексту `msgAlreadyExists` (утро 00:00–11:59, день 12:00–17:59, вечер 18:00–23:59).
+- **Валидация** — мягкие медицинские границы + обязательно `systolic > diastolic`.
+- **Миграция данных** — ленивый backfill по `username`.
+- **TOCTOU** — UNIQUE-индекс, `Save` возвращает признак вставки, `IsExists` удаляется.
+- Рефакторинг `Show` (аудит № 18) **объединён** с переходом на `user_id` (№ 2): сигнатура `Show` меняется один раз, сразу на `Show(ctx, userID) ([]Pressure, error)`. Поэтому № 18 живёт в Этапе 3, а Этап 2 — только логика.
 
 ---
 
-## P1 — Надёжность
+## Этап 2 — логика (правит тесты, схему БД не трогает)
 
-| № | Проблема | Место |
-|---|---|---|
-| 8 | Нет graceful shutdown; в `scratch` процесс — PID 1 и игнорирует SIGTERM → `docker stop` всегда ждёт 10 с и шлёт SIGKILL | `event-consumer.go:24`, `Dockerfile` |
-| 9 | Busy-loop: при ошибке `Fetch` — `continue` **без задержки** → шквал запросов и логов при недоступном API | `event-consumer.go:26-31` |
-| 10 | `offset` сдвигается **до** обработки (`telegram.go:56`), ошибка `Process` не ретраится → сообщение теряется молча | `telegram.go:56`, `event-consumer.go:51-58` |
-| 11 | TOCTOU `IsExists` → `Save` без транзакции; в схеме нет `UNIQUE` — дедупликация держится только на аппликативной проверке | `commands.go:66-76`, `sqlite.go:108` |
-| 12 | `*sql.DB` никогда не закрывается; пул не настроен (`SetMaxOpenConns`), DSN без `_busy_timeout` / WAL → риск `database is locked` | `sqlite.go:19-30`, `main.go` |
-| 13 | Long polling не используется: нет параметра `timeout` в `getUpdates`, вместо него `Sleep(1s)` → ~86 400 холостых запросов в сутки | `telegram.go:40-42` |
+Пункты аудита: 14, 15, 16.
 
-**Фиксы:** `context.WithCancel` + `signal.NotifyContext` в `main`, `Start(ctx)`, задержка перед `continue` при ошибке, `defer s.Close()`, `SetMaxOpenConns(1)`, `?_busy_timeout=5000&_journal_mode=WAL`, `UNIQUE(date, day_part, user_name)` + `INSERT ... ON CONFLICT DO NOTHING`.
+### 2.1 `dayPart` — границы по тексту `msgAlreadyExists`
+
+`events/telegram/commands.go:119-129`. Новая логика: `hour < 12` → утро, `12 <= hour < 18` → день, иначе вечер. Одной правкой чинит и полночь (баг 14), и 12:xx (баг 15); `messages.go:15` менять не нужно.
+
+Литералы `"утро"/"день"/"вечер"` → константы `dayPartMorning/dayPartDay/dayPartEvening` в `commands.go` (остаток п. 20 аудита). Новый тип не вводим — `storage.Pressure.DayPart` остаётся `string`.
+
+Тесты: `commands_test.go:110-136` — переписать кейсы: `00:00`/`00:59` → «утро», `12:00`/`12:59` → «день», `18:00`/`18:59` → «вечер»; добавить `11:59`, `17:59`, `23:59`.
+
+### 2.2 Валидация диапазонов
+
+Разделяем **роутинг** и **валидацию**:
+
+- `isPressure` (regexp) остаётся гейтом роутинга — `TestIsPressure` **не ломается**, кейс `{"999 999 999", true}` остаётся `true` (правится только комментарий на `commands_test.go:84`: regexp пропускает по формату, диапазоны проверяет `validatePressure`).
+- Новая `validatePressure(sys, dia, hr int) error` в `commands.go`: систолическое 60–260, диастолическое 30–200, пульс 30–220, обязательно `sys > dia`. Sentinel-ошибки объявляются рядом.
+- `savePressure` парсит три значения через `strconv.Atoi`, при ошибке валидации шлёт новое `msgInvalidPressure` (`messages.go`) и возвращает `nil` — это не сбой сервиса, а пользовательский ввод.
+
+Тип колонок в БД остаётся `TEXT` — конвертация в `INTEGER` вне скоупа.
+
+Тесты: новый `TestValidatePressure` (table-driven, границы включительно/исключительно, `sys <= dia`), `TestSavePressure_Invalid` (`Save` не вызван, отправлен `msgInvalidPressure`).
+
+### Верификация Этапа 2
+
+`go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`.
 
 ---
 
-## P2 — Баги логики
+## Этап 3 — ключ `user_id`, миграции, рефакторинг `Show` (меняет схему)
 
-### 14. `dayPart`: полночь попадает в «день»
+Пункты аудита: 2, 11, 18. Боевая БД: 3 строки, один пользователь `tsybaevArt`, дубликатов по `(date, day_part, user_name)` нет; индексов и механизма миграций нет.
+
+### 3.1 Механизм миграций (делается первым)
+
+`storage/sqlite/migrations.go`: срез `migrations []func(context.Context, *sql.Tx) error`, версия схемы — `PRAGMA user_version`. `Init` читает версию, применяет недостающие миграции (каждую — в своей транзакции) и поднимает `user_version`.
+
+Осознанное отступление от правила «только параметризованный SQL» (`AGENTS.md`): `PRAGMA user_version = N` не поддерживает плейсхолдеры; `N` — `int`-константа из кода, не пользовательский ввод. Зафиксировать комментарием в коде и строкой в `AGENTS.md`.
+
+- Миграция 1 — текущий `CREATE TABLE IF NOT EXISTS blood_pressure (...)` из `sqlite.go:112`. Боевая БД с `user_version = 0` уже ей соответствует, повторное применение безопасно.
+- Миграция 2 — см. 3.2.
+
+Тесты: `TestMigrations_Idempotent` (двойной `Init`); `TestMigrations_FromLegacySchema` (создать таблицу по старой схеме с `user_version = 0`, прогнать `Init`, проверить наличие колонки `user_id` и индексов).
+
+### 3.2 Схема (миграция 2)
+
+1. `ALTER TABLE blood_pressure ADD COLUMN user_id INTEGER` (NULL для старых строк).
+2. Дедупликация-страховка: `DELETE FROM blood_pressure WHERE rowid NOT IN (SELECT MIN(rowid) FROM blood_pressure GROUP BY date, day_part, user_name)`.
+3. `CREATE UNIQUE INDEX IF NOT EXISTS idx_pressure_key ON blood_pressure(date, day_part, user_id)` — `NULL` в SQLite различны, поэтому legacy-строки индексу не мешают.
+4. `CREATE INDEX IF NOT EXISTS idx_pressure_legacy ON blood_pressure(user_name) WHERE user_id IS NULL` — частичный индекс под ленивый backfill (после переноса практически пуст).
+
+### 3.3 Проброс `user_id` через слои
+
+- `clients/telegram/types.go:59-61` — `From{ID int64, Username string}`.
+- `events/telegram/telegram.go:24-27,101-106` — `Meta.UserID int64`.
+- `doCmd(ctx, text string, chatID int, userID int64, username string)`.
+- `storage.Pressure` — поле `UserID int64`; `UserName` остаётся отображаемым/аудитным, в ключ не входит.
+- Логирование в `commands.go:33` — по `userID`, без username (меньше персональных данных в логах).
+
+### 3.4 Рефакторинг `Show` (объединено с № 18)
+
+Сигнатура меняется один раз, сразу под `user_id`:
+
+- `storage/storage.go` — `Show(ctx context.Context, userID int64) ([]Pressure, error)`.
+- `storage/sqlite/sqlite.go:56-96` — фильтр по `user_id`, убрать `strings.Builder` и русский текст, вернуть срез.
+- `events/telegram/commands.go:95-109` — `show` получает срез; при `len(res) == 0` → `msgNoSavedPressure`, иначе `formatPressures(res)`.
+- `formatPressures` — в `commands.go`; шаблон строки — константа `msgPressureLine` в `messages.go`, формат сохраняем байт-в-байт (`"Дата: %s, часть суток: %s, показания: %s/%s/%s\n\n"`), сборка через `strings.Builder`.
+
+### 3.5 Дедупликация без TOCTOU (№ 11)
+
+`storage.Storage` становится:
 
 ```go
-// commands.go:116
-if hour > 0 && hour <= 12 { return "утро" }
+Save(ctx context.Context, p *Pressure) (bool, error)   // false — запись за эту часть суток уже есть
+Show(ctx context.Context, userID int64) ([]Pressure, error)
+ClaimLegacy(ctx context.Context, userID int64, userName string) error
 ```
 
-`hour == 0` (00:00–00:59) проваливается в `hour <= 18` → **«день»**. Должно быть «вечер» либо «утро».
+`IsExists` удаляется из интерфейса и из `sqlite.go:99-109`; `Remove` уже удалён в Этапе 1. `Save` — один запрос `INSERT ... ON CONFLICT(date, day_part, user_id) DO NOTHING`, признак вставки — из `RowsAffected()`. `savePressure` шлёт `msgAlreadyExists` при `false` — гонка исчезает физически.
 
-### 15. `dayPart`: 12:00–12:59 это «утро», хотя `msgAlreadyExists` обещает «утро — до 12»
+### 3.6 Ленивый backfill старых записей
 
-Текст в `messages.go:15` противоречит коду `commands.go:116-118`.
+`ClaimLegacy`: `UPDATE OR IGNORE blood_pressure SET user_id = ? WHERE user_id IS NULL AND user_name = ?`.
 
-> Оба зафиксированы тестом `commands_test.go:119-120`. По `AGENTS.md` «чинить» их без одновременной правки тестов нельзя — нужно решение владельца.
+Вызов — из `doCmd` до диспетчеризации, только при непустом `username`, один раз на пользователя за время жизни процесса (map в `Processor`; консьюмер однопоточный, мьютекс не нужен — `-race` в `make test` подтвердит). `OR IGNORE` защищает от конфликта с UNIQUE-индексом; неперенесённые остатки остаются невидимыми, но запись не ломают.
 
-### 16. Нет валидации диапазонов
+### 3.7 Тесты Этапа 3
 
-`999 999 999` сохраняется (`commands.go:126`). Нет проверки систолическое > диастолическое, нет медицинских границ. Тоже зафиксировано тестом (`commands_test.go:84`).
+`sqlite_test.go`:
 
-### 17. Ошибка не доходит до пользователя
+- `TestSave_Duplicate` — второй `Save` → `false`, в таблице одна строка.
+- `TestShow_ByUserID` — разные `user_id` не видят записи друг друга (в т. ч. с одинаковым пустым `user_name`); `Show` возвращает `[]Pressure`.
+- `TestClaimLegacy` — строка без `user_id` становится видна в `Show(userID)`.
+- `TestClaimLegacy_OtherUserUntouched`.
+- Правка `TestSave_IsExists`, `TestShow_Today`, `TestShow_OtherDay`, `TestShow_Empty` под новые сигнатуры и срез.
 
-При сбое БД (`commands.go:68,75`) ошибка уходит только в лог. Пользователь не получает **ничего** — сообщение «проваливается». В `messages.go` нет `msgError`.
+`commands_test.go`:
 
----
+- `mockStorage`: `Save` → `(bool, error)`, `Show` → срез, удалить `IsExists`/`Remove`, добавить `ClaimLegacy` со счётчиком.
+- `TestSavePressure_Duplicate` — на `saveFunc → false`.
+- `TestShow_WithData` — проверяет результат `formatPressures`.
+- `TestFormatPressures` (одна и несколько записей).
+- `TestClaimLegacy_CalledOncePerUser`.
 
-## P3 — Рефакторинг
+### 3.8 Порядок работ внутри Этапа 3
 
-### 18. Нарушение слоёв: хранилище формирует UI
+1. Механизм миграций + перенос текущего DDL в миграцию 1 (поведение не меняется, тесты зелёные).
+2. Миграция 2 + `From.ID` → `Meta` → `Pressure.UserID`.
+3. `Show(userID) ([]Pressure, error)` + `formatPressures` (объединённый № 18).
+4. `Save` с `ON CONFLICT DO NOTHING`, удаление `IsExists`.
+5. `ClaimLegacy` + ленивый вызов из `doCmd`.
+6. Обновление тестов и `AGENTS.md` (новые сигнатуры `Storage`, механизм миграций, исключение для `PRAGMA`).
 
-`storage/sqlite/sqlite.go:76-81` возвращает готовую русскоязычную строку для Telegram вместо `[]storage.Pressure`. Это закреплено в интерфейсе (`storage.go:10`) и нарушает правило «все тексты — в `messages.go`». Плюс `+=` в цикле вместо `strings.Builder`.
+### Верификация Этапа 3
 
-**Фикс:** `Show(ctx, user) ([]storage.Pressure, error)`, форматирование — в `events/telegram`. Ломает `sqlite_test.go:119` и `commands_test.go:267`.
-
-### 19. Мёртвый код (удалить)
-
-| Что | Место | Почему мёртв |
-|---|---|---|
-| ветка `sql.ErrNoRows` | `sqlite.go:54-56` | `db.Query` **никогда** не возвращает `ErrNoRows` (только `QueryRow().Scan()`); плюс `==` вместо `errors.Is` |
-| обе ветки `ErrNoSavedPressure` | `commands.go:90,94` | недостижимы по той же причине, работает только `msg == ""` |
-| `storage.ErrNoSavedPages` | `storage.go:15` | не используется, реликт форка |
-| `Remove` | `storage.go:11`, `sqlite.go:85-92` | из бота не вызывается |
-| `UpdatesResponse.Ok` | `types.go:4` | парсится, не читается |
-| проверка ошибки `handleEvents` | `event-consumer.go:39-43` | `handleEvents` всегда возвращает `nil` |
-| `app_bash` | `Makefile:31-32` | `docker compose exec` без имени сервиса — нерабочая команда |
-
-### 20. Дублирование
-
-- `"Asia/Yekaterinburg"` в `commands.go:47` и `sqlite.go:45` независимо. Разъедутся — пользователь не увидит свои записи. Плюс `LoadLocation` вызывается **на каждое сообщение** (чтение с ФС).
-- `"2006-01-02"` в двух местах.
-- `"утро" / "день" / "вечер"` — одновременно значение колонки БД и текст для пользователя, без типа `DayPart`.
-- Регулярки компилируются на каждый вызов (`commands.go:126,132`) вместо пакетных `var`.
-
-### 21. Мелочи
-
-- `e.Wrap(msg, nil)` даст `%!w(<nil>)` — нет проверки на nil (`lib/e/e.go:5-7`).
-- Незакрытая кавычка в `log.Printf` (`commands.go:24`).
-- `Show` игнорирует `ctx` — `db.Query` вместо `QueryContext` (`sqlite.go:52`), единственное такое место в файле.
-- `Consumer.Start()` — value receiver, `handleEvents` — pointer.
-- Смешение русского и английского в текстах ошибок.
-- Показания давления + username пишутся в plaintext-лог дважды (`commands.go:24`, `event-consumer.go:49`), без уровней и ротации.
+`go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`, плюс ручная проверка на копии боевой БД: `cp data/sqlite/storage.db /tmp/...`, прогон `Init`, проверка что после первого сообщения от `tsybaevArt` его 3 записи видны в `/show`.
 
 ---
 
-## Порядок выполнения
+## Вне скоупа Этапов 2 и 3
 
-- **Этап 1** (без изменения схемы и тестов): 1, 3, 4, 5, 6, 7, 9, 12, 17, 19, 20, 21
-- **Этап 2** (требует правки тестов): 14, 15, 16, 18
-- **Этап 3** (требует изменения схемы БД + миграции): 2, 11
-
----
-
-# Этап 1 — согласованный скоуп
-
-Инфраструктурные файлы (`Dockerfile`, `docker-compose.yml`) править **разрешено**. Всё ниже не меняет схему БД и не ломает существующие тесты (`commands_test.go`, `sqlite_test.go` проходят без правок).
-
-## Чек-лист
-
-### Безопасность
-
-1. `clients/telegram/telegram.go` — вынести токен в поле `Client.token`, санитизировать `*url.Error` перед возвратом (токен не должен попадать в текст ошибки).
-2. `main.go:44` — `mustToken()` делает `log.Fatal` при пустом `TG_KEY`.
-
-### HTTP-клиент
-
-3. `telegram.go:29` — `http.Client{Timeout: 30 * time.Second}`.
-4. `telegram.go:80` — `http.NewRequestWithContext`; проброс `ctx` через `Updates` / `SendMessage` и интерфейс `events/telegram.Client:12-15` (интерфейс на стороне потребителя сохраняем — моки в тестах зависят от него).
-5. `doRequest` — проверка `resp.StatusCode`; `io.LimitReader` на теле.
-6. `types.go` — добавить `ErrorCode`, `Description`, `Parameters.RetryAfter`; проверять `Ok` в `Updates`.
-7. `telegram.go:40-42` — параметр `timeout` для long polling вместо `Sleep(1s)` в консьюмере.
-
-### Устойчивость
-
-8. `event-consumer.go:47` — `defer recover()` вокруг `Process`.
-9. `event-consumer.go:30` — задержка перед `continue` при ошибке `Fetch` (убрать busy-loop).
-10. `main.go` — `signal.NotifyContext(SIGINT, SIGTERM)`, `Start(ctx)` с выходом из цикла, `defer s.Close()`.
-11. `sqlite.go:19` — метод `Close()`, `SetMaxOpenConns(1)`, DSN `?_busy_timeout=5000&_journal_mode=WAL`.
-12. `commands.go:60-62` — явная проверка `len(pressures) < 3` перед индексацией.
-13. `commands.go` — `msgError` в `messages.go`, отправка пользователю при сбое БД.
-
-### Инфраструктура
-
-14. `docker-compose.yml` — `restart: unless-stopped`, `init: true`, монтировать **директорию** `./data/sqlite`, а не файл (иначе теряются `-wal` / `-shm` и ломается при пересоздании inode), `logging` с ротацией.
-15. `Dockerfile` — `USER` вместо uid 0, `-trimpath`.
-
-### Чистка
-
-16. Удалить: `sqlite.go:54-56`, `commands.go:90-96` (упростить до `msg == ""`), `storage.ErrNoSavedPages`, `Remove`, `event-consumer.go:39-43`, `Makefile:31-32`.
-17. `event-consumer.go:47` — `handleEvents` без возврата `error` (всегда `nil`).
-18. Вынести `"Asia/Yekaterinburg"` и `"2006-01-02"` в общее место; `LoadLocation` — один раз при старте, не на каждое сообщение.
-19. Пакетные `var` для регулярок (`commands.go:126,132`).
-20. `sqlite.go:52` — `QueryContext` вместо `Query`; `strings.Builder` вместо `+=`.
-21. `lib/e/e.go:5` — проверка на nil в `Wrap`.
-22. `commands.go:24` — незакрытая кавычка; убрать дублирующее логирование показаний (`event-consumer.go:49`).
-23. `event-consumer.go:24` — pointer receiver для `Start`.
-
-## Осознанно вне Этапа 1
-
-| Пункт | Почему отложен |
+| Пункт | Почему |
 |---|---|
-| `from.id` вместо `username` как ключ (P0 № 2) | Нужна новая колонка + миграция существующих данных |
-| `UNIQUE(date, day_part, user_name)` + TOCTOU (P1 № 11) | Изменение схемы |
-| `dayPart`: полночь → «день», 12:xx → «утро» (P2 № 14, 15) | Зафиксировано `commands_test.go:119-120` |
-| Валидация диапазонов (P2 № 16) | Зафиксировано `commands_test.go:84` |
-| `Show` возвращает `[]Pressure` вместо строки (P3 № 18) | Ломает `sqlite_test.go:119` и `commands_test.go:267` |
-| Ретрай: сдвиг `offset` до обработки (P1 № 10) | Требует переработки контракта `Fetcher` / `Processor` |
-
-**Верификация после реализации:** `go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`.
-
----
-
-# Обновление `AGENTS.md`
-
-## Когда
-
-AGENTS.md правится **последним шагом Этапа 1**, после того как прошла верификация. Причина: файл содержит номера строк и проценты покрытия — их нельзя записать до того, как код зафиксирован.
-
-Отдельный коммит не нужен, идёт в общий с Этапом 1. `.dockerignore` исключает `*.md`, так что на образ правка не влияет.
-
-## 1. Утверждения, которые станут ложными — переписать
-
-| Строка | Сейчас | После Этапа 1 |
-|---|---|---|
-| `10` | «**Long polling не используется**: в `getUpdates` нет параметра `timeout`, вместо него `time.Sleep(1s)`» | Long polling используется, параметр `timeout` передаётся; `Sleep` в консьюмере убран |
-| `20` | DTO: `Update`, `IncomingMessage`, `From`, `Chat` | + поля ошибок API (`ok`, `error_code`, `description`, `parameters.retry_after`) |
-| `25` | «Интерфейс `Consumer`» | Сигнатура стала `Start(ctx context.Context) error` |
-| `26` | «бесконечный цикл fetch → process» | Цикл завершается по отмене `ctx`; есть `recover` вокруг `Process`; `handleEvents` больше не возвращает `error` |
-| `27` | «Интерфейс `Storage`, модель `Pressure`, sentinel-ошибки» | `Remove` и `ErrNoSavedPages` удалены; уточнить, какие sentinel остались |
-| `28` | описание `sqlite.go` | + метод `Close()`, настройка пула, DSN с параметрами |
-| `29` | «`Wrap` / `WrapIfErr`» | `Wrap` теперь nil-safe |
-| `31` | «Таргеты `dc_*` … и `test`» | `app_bash` удалён |
-| `34` | «Файл БД, монтируется как volume» | Монтируется **директория** `data/sqlite`; появились `-wal` / `-shm` |
-| `85–86` | Покрытие 54.7% / 70.8% | **Перемерить** — `go test ./... -cover`, вписать фактические числа |
-| `99` | «вне покрытия: … `storage.Remove` …» | `Remove` удалён — убрать из списка; `clients/telegram` разросся, пересмотреть обоснование |
-| `116` | «он входит в `basePath` HTTP-клиента, поэтому URL запросов **нельзя логировать целиком**» | Токен вынесен из `basePath`, ошибки санитизируются в клиенте. Правило переформулировать: **логировать только санитизированные ошибки клиента, `err.Error()` от `*url.Error` наружу не пробрасывать** |
-| `123` | «Таймзона захардкожена в **двух местах**: `commands.go:47` и `sqlite.go:45`» | Одно место + инициализация при старте. Обновить путь и убрать «менять только вместе» |
-
-## 2. Строки, которые надо удалить целиком
-
-«Известные ловушки», закрытые Этапом 1:
-
-- `124` — мёртвый код (`ErrNoSavedPages`, недостижимая ветка `ErrNoSavedPressure`)
-- `125` — value/pointer receiver у `Consumer`
-- `127` — `http.Client{}` без таймаута, `context.Background()` / `TODO()` без дедлайнов
-- `128` — busy-loop при ошибке `Fetch`
-- `129` — `pressures[0..2]` без проверки длины
-- `130` — монтирование файла БД вместо директории (заменяется новой формулировкой, см. п. 1 строка 34)
-- `131` — отсутствие graceful shutdown
-
-## 3. Что добавить — незакрытые риски
-
-Сейчас в AGENTS.md **не задокументированы** две критические проблемы, которые Этап 1 не решает. Их нужно внести в «Известные ловушки», иначе следующий агент их не увидит:
-
-- **Ключ пользователя — изменяемый `username`, а `from.id` не парсится.** Пользователи без `@username` получают общий ключ `("", date, day_part)` и видят чужие показания через `/show`. Смена ника отвязывает историю. Исправление требует новой колонки и миграции.
-- **TOCTOU между `IsExists` и `Save`** (`commands.go`): нет транзакции, в схеме нет `UNIQUE (date, day_part, user_name)`. Дедупликация держится только на аппликативной проверке и однопоточности консьюмера.
-
-Также добавить как ловушки:
-
-- Показания давления и username пишутся в логи в plaintext, без уровней и ротации.
-- Сдвиг `offset` происходит **до** обработки, ошибка `Process` не ретраится → событие теряется безвозвратно (усиление к существующей строке `126`).
-
-## 4. Что добавить — новые конвенции
-
-В раздел «Стиль кода и конвенции»:
-
-- **`context.Context` пробрасывается сверху вниз** до HTTP и SQL. `context.Background()` / `TODO()` в прод-коде вне `main` запрещены. В `storage/sqlite` — только `*Context`-варианты (`QueryContext`, `ExecContext`).
-- **Ответ Telegram API проверяется дважды**: HTTP-код и поле `ok`. Возврат `(nil, nil)` при ошибке API недопустим.
-- **Токен не попадает в текст ошибок.** Любая новая ошибка из `clients/telegram` проходит санитизацию перед возвратом.
-- **Регулярные выражения — пакетные `var ... = regexp.MustCompile(...)`**, компиляция внутри функции запрещена.
-- `msgError` добавлен в `messages.go` — при сбое пользователь получает ответ, а не тишину.
-
-В раздел «Ограничения и безопасность»:
-
-- Пункт `108` (нельзя править `Dockerfile`, `docker-compose.yml`, `Makefile`) — **оставить как есть**. Разрешение было разовым, на Этап 1.
-- Пункт `107` (запрет менять схему БД) — **оставить**, он остаётся в силе и блокирует Этап 3.
-- Пункт `110` (запрет «чинить» `dayPart` и валидацию диапазонов) — **оставить**, Этап 1 их не трогает.
-
-## 5. Сопутствующая правка вне AGENTS.md
-
-- **`.gitignore`**: включение WAL создаёт `storage.db-wal` и `storage.db-shm`, которые под `*.db` **не подпадают**. Добавить `*.db-wal`, `*.db-shm` (или заменить на `*.db*`). Иначе файлы БД попадут в `git status` и рискуют быть закоммичены.
-- **`tests_plan.md`**: строка про `storage.Remove` вне покрытия устареет вместе с `AGENTS.md:99`.
-
-## 6. Уже неточное сегодня — исправить заодно
-
-`AGENTS.md:12` утверждает «утро — до 12», но код `commands.go:116` (`hour > 0 && hour <= 12`) относит 12:00–12:59 к утру, а 00:00–00:59 — к «дню». Формулировка расходится с кодом **уже сейчас**, до всяких правок.
-
-Поскольку сам `dayPart` в Этапе 1 не трогаем, корректно описать **фактическое** поведение и явно пометить его как баг со ссылкой на тест `commands_test.go`, а не переписывать код.
-
-## Проверка после правки AGENTS.md
-
-Все номера строк в файле — ручные, автоматической сверки нет. Перед завершением прогнать глазами каждую ссылку вида `file.go:NN` и убедиться, что она указывает на то, что описано. После Этапа 1 сместятся практически все.
+| Ретрай: `offset` сдвигается до обработки (аудит № 10) | Требует переработки контракта `Fetcher`/`Processor` — отдельный этап |
+| `systolic`/`diastolic`/`heart_rate` → `INTEGER` | Расширяет миграцию, выгоды для текущей логики нет |
+| Структурное логирование, уровни (`log/slog`) | Отдельная задача, не связана с багами |
