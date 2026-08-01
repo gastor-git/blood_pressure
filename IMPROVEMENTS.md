@@ -1,98 +1,120 @@
-# План: команда `/download` для Telegram-бота
+# План: напоминания о передаче показаний АД
 
-Команда формирует CSV-файл с показаниями текущего пользователя за всё время и отправляет его через Telegram API (`sendDocument`).
+Бот уведомляет пользователя за 30 минут до окончания части суток (Утро, День, Вечер), что пора передать показания артериального давления. Текст: «Пора передать показания за {часть суток}».
 
 ## Решения
 
-- Разделитель CSV — `;` (точка с запятой), для совместимости с русским Excel.
-- Пустые данные — сообщение `msgNoSavedPressure` (файл не отправляем).
-- Пустой username — имя файла `user_{дата}.csv`.
-
-Формат заголовка (CSV не умеет вложенные шапки, подколонки «плоским» списком):
-```
-Дата;Утро систолическое;Утро диастолическое;Утро пульс;День систолическое;День диастолическое;День пульс;Вечер систолическое;Вечер диастолическое;Вечер пульс
-```
-Одна строка на дату; отсутствующие части суток — пустые ячейки. Значения в БД — строки, кавычек/запятых/точки с запятой в них нет, поэтому собираем `strings.Join(fields, ";")` без `encoding/csv` (стандартный `csv.Writer` не умеет менять разделитель).
+- Время напоминаний — в таймзоне учёта `lib/timeloc` (`Asia/Yekaterinburg`), за 30 минут до конца части суток: утро → **11:30**, день → **17:30**, вечер → **23:30**.
+- Получатели — только пользователи, ещё **не** передавшие показания за текущую часть суток.
+- Источник списка пользователей — новая таблица `users`, заполняется upsert-ом при каждом входящем сообщении (пользователи, ни разу не сохранявшие показания, тоже получают напоминания).
+- Текст напоминания собирается из константы `msgReminder` (префикс `msg`, живёт в `events/telegram/messages.go` по конвенции) + метка части суток строчными (`утро`/`день`/`вечер`).
+- Рассылка — отдельный пакет `notifier` с циклом `Start(ctx)` в собственной горутине; long-polling-консьюмер не трогаем. Интерфейсы (`Storage`, `Sender`) объявлены на стороне потребителя.
+- Пропущенный триггер (например, процесс не был запущен в 11:30) не догоняется: при старте вычисляется ближайшее будущее время срабатывания. Осознанное ограничение.
 
 ## 1. Storage-слой
 
-**`storage/storage.go`** — добавить в интерфейс:
+**`storage/storage.go`** — модель и новые методы интерфейса:
 ```go
-GetAll(ctx context.Context, userID int64) ([]Pressure, error)
+type User struct {
+	UserID   int64
+	ChatID   int64
+	UserName string
+}
+// RegisterUser — upsert пользователя при каждом входящем сообщении.
+RegisterUser(ctx context.Context, userID int64, chatID int64, userName string) error
+// UsersWithoutPressure — пользователи без записи за дату+часть суток.
+UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]User, error)
 ```
-«За всё время» для пользователя по `user_id` (legacy-записи уже привязаны через `claimLegacy` в `doCmd` до роутинга — работает автоматически).
 
-**`storage/sqlite/sqlite.go`** — реализация:
-- `SELECT date, day_part, systolic, diastolic, heart_rate, user_id, user_name FROM blood_pressure WHERE user_id = ? ORDER BY date` (только параметризованный запрос).
-- Дата в формате `2006-01-02` сортируется лексикографически = хронологически, `ORDER BY date` достаточно; порядок частей суток обеспечим в форматтере (см. п. 3).
-- Ошибки по конвенции пакета — `fmt.Errorf("...: %w", err)`. Миграций не нужно — таблица и индексы уже есть.
-
-## 2. Клиент Telegram
-
-**`clients/telegram/telegram.go`**:
-- Константа `sendDocumentMethod = "sendDocument"`.
-- Новый метод `SendDocument(ctx context.Context, chatID int, filename string, data []byte) error`:
-  - POST `multipart/form-data` на `sendDocument`: поле `chat_id`, файл `document` с `filename`.
-  - Использовать `multipart.Writer` из stdlib.
-  - Ответ проверить дважды, как требует AGENTS.md: HTTP-статус + поле `ok` → `toError()`; ошибки через `sanitize` (токен наружу не уходит). Тело ответа — та же форма `UpdatesResponse` (для ошибок важен только `ok/error_code/description/parameters`), можно переиспользовать `statusError`/`toError`.
-  - Чтобы не дублировать обработку ответа, вынести общий хелпер (статус-чек + парсинг) из `doRequest`, либо добавить рядом отдельный `doMultipart`-путь; `sanitize`-обёртка остаётся в обоих.
-
-`types.go` не меняется — поля `ok/error_code/...` уже есть.
-
-## 3. Команды и форматирование
-
-**`events/telegram/telegram.go`** — в интерфейс `Client` добавить:
-```go
-SendDocument(ctx context.Context, chatID int, filename string, data []byte) error
+**`storage/sqlite/migrations.go`** — `migration3` (добавляется в конец среза `migrations`):
+```sql
+CREATE TABLE IF NOT EXISTS users (
+	user_id INTEGER PRIMARY KEY,
+	chat_id INTEGER NOT NULL,
+	user_name TEXT,
+	updated_at TEXT NOT NULL
+)
 ```
-(интерфейс объявлен на стороне потребителя — конкретный `*clients/telegram.Client` удовлетворит его неявно; мок доработаем в тестах).
+
+**`storage/sqlite/sqlite.go`**:
+- `RegisterUser` — `INSERT INTO users (user_id, chat_id, user_name, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, user_name = excluded.user_name, updated_at = excluded.updated_at`; `updated_at = timeloc.Now().Format(time.RFC3339)`. Только параметризованный запрос.
+- `UsersWithoutPressure`:
+  ```sql
+  SELECT u.user_id, u.chat_id, u.user_name FROM users u
+  WHERE NOT EXISTS (
+      SELECT 1 FROM blood_pressure bp
+      WHERE bp.user_id = u.user_id AND bp.date = ? AND bp.day_part = ?
+  )
+  ```
+  Legacy-записи с `user_id IS NULL` не блокируют напоминание (не принадлежат зарегистрированному пользователю).
+- Ошибки по конвенции пакета — `fmt.Errorf("...: %w", err)`.
+
+## 2. Регистрация пользователя и текст
 
 **`events/telegram/commands.go`**:
-- Константа `DownloadCmd = "/download"`.
-- В `doCmd` — `case DownloadCmd: return p.download(ctx, chatID, userID, username)`.
-- Обработчик:
+- В `doCmd` после `claimLegacy`:
+  ```go
+  if err := p.storage.RegisterUser(ctx, userID, int64(chatID), username); err != nil {
+  	return e.Wrap("не удалось сохранить пользователя", err)
+  }
+  ```
+- `dayPart` → экспорт в `DayPart(t time.Time) string` (нужен пакету `notifier` для метки части суток). Обновить вызов в `savePressure` и `TestDayPart`.
+
+**`events/telegram/messages.go`** — `const msgReminder = "Пора передать показания за %s"` (единственное место текстов для пользователя).
+
+## 3. Пакет `notifier` (новый)
+
+**`notifier/notifier.go`**:
 ```go
-func (p *Processor) download(ctx context.Context, chatID int, userID int64, username string) (err error) {
-    // defer e.WrapIfErr("Ошибка при выполнении команды: download", err)
-    // pressures, err := p.storage.GetAll(ctx, userID)
-    //   err -> msgError + вернуть err
-    // len == 0 -> p.tg.SendMessage(ctx, chatID, msgNoSavedPressure)
-    // p.tg.SendDocument(ctx, chatID, csvFilename(username), []byte(formatCSV(pressures)))
+type Storage interface {
+	UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]storage.User, error)
+}
+
+type Sender interface {
+	SendMessage(ctx context.Context, chatID int, text string) error
+}
+
+type Notifier struct {
+	storage Storage
+	tg      Sender
 }
 ```
+- `var reminderHours = []int{11, 17, 23}` — часы срабатывания (минута всегда `30`).
+- `nextTrigger(now time.Time) time.Time` — чистая функция: ближайшее из времён `{11:30, 17:30, 23:30}` строго после `now`; если все прошли — первое из них завтра. Построение времени — через `time.Date(..., timeloc.Location())`.
+- `Start(ctx) error` — цикл: `nextTrigger(timeloc.Now())` → `time.NewTimer(time.Until(trigger))` + `select` на `ctx.Done()` → `notify`; ошибки логируются, цикл продолжается; завершается по отмене `ctx` (как консьюмер).
+- `notify(ctx, trigger)` — метка `telegram.DayPart(trigger)`; `UsersWithoutPressure(ctx, timeloc.Today(), метка)`; каждому пользователю `SendMessage(ctx, int(u.ChatID), fmt.Sprintf(msgReminder, метка))`. Ошибка отправки одному пользователю не прерывает рассылку остальным. Ошибки — `lib/e` через `defer` (`WrapIfErr`). Логировать только санитизированные ошибки клиента.
 
-**Новый файл `events/telegram/csv.go`** (CSV-генерация — бизнес-логика формата, живёт в `events/telegram`, как `formatPressures`):
-- `formatCSV(pressures []storage.Pressure) string`:
-  - Шапка из констант `messages.go` (см. п. 4).
-  - Группировка по дате; для каждой даты фиксированный порядок частей суток: утро → день → вечер; пропущенные → пустые ячейки.
-  - `strings.Join(fields, ";")`, CRLF (`\r\n`) и префикс UTF-8 BOM (`\xEF\xBB\xBF`) для корректного открытия в русском Excel.
-- `csvFilename(username string) string` → `{username}_{timeloc.Now().Format(timeloc.DateFormat)}.csv`, при пустом username — `user`.
+## 4. `main.go`
 
-**`events/telegram/messages.go`** — константы (префикс `msg`, тесты будут сравнивать именно с ними):
-- `msgCSVHeader` — полная строка шапки из формата выше.
+Запуск рассылки в отдельной горутине рядом с консьюмером:
+```go
+go func() {
+	if err := notifier.New(s, tgClient.New(tgBotHost, mustToken())).Start(ctx); err != nil {
+		log.Print("notifier stopped: ", err)
+	}
+}()
+```
+SQLite-пул с `SetMaxOpenConns(1)` сериализует одновременные запросы консьюмера и нотификатора — гонок нет.
 
-## 4. Тесты
+## 5. Тесты
 
-**`events/telegram/commands_test.go`** (дополняем существующий файл, table-driven стиль):
-- Расширить `mockClient`: метод `SendDocument`, запоминающий `sentChatID`, `sentFilename`, `sentData`; добавить поле `sendDocErr`.
-- Расширить `mockStorage`: поле `getAllFunc`, `getAllCalls`.
-- `TestDownload_Empty` — `getAllFunc` возвращает `nil` → отправлено ровно `msgNoSavedPressure`, `SendDocument` не вызывался.
-- `TestDownload_WithData` — данные за две даты → проверяем `sentFilename == "user_<today в Asia/Yekaterinburg>.csv"` и точное содержимое CSV (BOM + шапка + строки в порядке дат).
-- `TestDownload_EmptyUsername` — `username == ""` → `sentFilename` начинается с `user_`.
-- `TestDownload_StorageError` — sentinel-ошибка → `msgError` отправлен, ошибка пробрасывается и содержит префикс `"Ошибка при выполнении команды: download"` (аналог `TestSavePressure_StorageError`).
-- `TestFormatCSV` — table-driven: одна дата с тремя частями суток; частичная (пустые ячейки); порядок дат и частей суток; корректность шапки (сравнение с `msgCSVHeader`).
-- `TestCSVFilename` — формат имени и фолбэк `user`.
-- В `TestDoCmd_Routing` добавить кейс для `/download` (проверка вызова `SendDocument`).
-- Учесть: `doCmd` вызывает `claimLegacy` до роутинга — в тестах `mockStorage.ClaimLegacy` уже возвращает nil.
+**`events/telegram/commands_test.go`** (существующий файл, table-driven стиль):
+- `mockStorage` дополнить методами `RegisterUser`/`UsersWithoutPressure` — интерфейс `storage.Storage` расширен, без них тесты не соберутся.
+- `TestRegisterUser_CalledOnCommand` — каждый `doCmd` вызывает `RegisterUser` с корректными `userID`/`chatID`/`username`.
+- `TestDayPart` — переименование вызова `dayPart` → `DayPart` (границы не меняются).
 
 **`storage/sqlite/sqlite_test.go`**:
-- `TestGetAll_AllTime` — записи за разные даты (включая не-сегодняшнюю) → возвращаются все, упорядочены по дате.
-- `TestGetAll_ByUser` — записи двух пользователей → только свои (аналог `TestShow_ByUserID`).
-- `TestGetAll_Empty` — пустая выборка, без ошибки.
+- `TestRegisterUser_Insert` — первый вызов создаёт запись.
+- `TestRegisterUser_Upsert` — повторный вызов обновляет `chat_id`/`user_name`, не плодит дубликаты.
+- `TestUsersWithoutPressure` — возвращает только тех, у кого нет записи за дату+часть суток; передавший исключён; legacy-строка с `user_id IS NULL` не мешает; пустая выборка без ошибки.
 
-**`clients/telegram`** (опционально, в репозитории сейчас нет тестов клиента): `httptest.Server`, проверяющий, что `SendDocument` шлёт POST на `/sendDocument`, multipart содержит `chat_id` и файл с правильным `filename`. Если решите не добавлять — не критично, покрытие команды закрывается моками выше.
+**`notifier/notifier_test.go`** (новый):
+- `TestNextTrigger` — до 11:30 → 11:30 сегодня; 12:00 → 17:30; 18:00 → 23:30; 23:31 → 11:30 завтра; ровно 11:30 → 17:30 (триггер строго позже `now`).
+- `TestNotify` — мок `Storage`/`Sender`: двум пользователям ушёл `fmt.Sprintf(msgReminder, "день")`, метка выведена из `trigger`.
+- `TestNotify_StorageError` — ошибка хранилища обёрнута (`errors.Is` по sentinel), рассылка не выполнялась.
+- `TestNotify_SendError` — сбой отправки одному пользователю: остальные получают.
 
-## 5. Верификация
+## 6. Верификация
 
 Перед завершением (по AGENTS.md): `go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`. Коммит — только по явному запросу.
 
@@ -100,12 +122,13 @@ func (p *Processor) download(ctx context.Context, chatID int, userID int64, user
 
 | Файл | Изменение |
 |---|---|
-| `storage/storage.go` | + `GetAll` в интерфейс |
-| `storage/sqlite/sqlite.go` | + реализация `GetAll` |
-| `clients/telegram/telegram.go` | + `sendDocumentMethod`, + `SendDocument`, хелпер обработки ответа |
-| `events/telegram/telegram.go` | + `SendDocument` в интерфейс `Client` |
-| `events/telegram/commands.go` | + `DownloadCmd`, кейс роутинга, `download` |
-| `events/telegram/csv.go` | **новый** — `formatCSV`, `csvFilename` |
-| `events/telegram/messages.go` | + `msgCSVHeader` |
-| `events/telegram/commands_test.go` | моки + тесты команды и формата |
-| `storage/sqlite/sqlite_test.go` | тесты `GetAll` |
+| `storage/storage.go` | + `User`, + `RegisterUser`, + `UsersWithoutPressure` |
+| `storage/sqlite/migrations.go` | + `migration3` (таблица `users`) |
+| `storage/sqlite/sqlite.go` | + реализации `RegisterUser`, `UsersWithoutPressure` |
+| `events/telegram/commands.go` | + вызов `RegisterUser` в `doCmd`, `dayPart` → `DayPart` |
+| `events/telegram/messages.go` | + `msgReminder` |
+| `notifier/notifier.go` | **новый** — `Notifier`, `Start`, `nextTrigger`, `notify` |
+| `main.go` | + запуск `notifier` в горутине |
+| `events/telegram/commands_test.go` | моки + тест `RegisterUser` |
+| `storage/sqlite/sqlite_test.go` | тесты `RegisterUser`, `UsersWithoutPressure` |
+| `notifier/notifier_test.go` | **новый** — тесты расписания и рассылки |

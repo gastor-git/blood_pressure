@@ -12,6 +12,16 @@ type Storage interface {
 	// ClaimLegacy привязывает старые записи (user_id IS NULL) к userID по
 	// user_name — ленивый backfill.
 	ClaimLegacy(ctx context.Context, userID int64, userName string) error
+	// RegisterUser — upsert пользователя при каждом входящем сообщении.
+	RegisterUser(ctx context.Context, userID int64, chatID int64, userName string) error
+	// UsersWithoutPressure — пользователи без записи за дату+часть суток.
+	UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]User, error)
+}
+
+type User struct {
+	UserID   int64
+	ChatID   int64
+	UserName string
 }
 
 type Pressure struct {

@@ -317,6 +317,124 @@ func insertLegacy(ctx context.Context, s *Storage, date, dayPart, sys, dia, hr, 
 	return err
 }
 
+func TestRegisterUser_Insert(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	if err := s.RegisterUser(ctx, 1, 42, "user1"); err != nil {
+		t.Fatalf("RegisterUser() failed: %v", err)
+	}
+
+	users, err := s.UsersWithoutPressure(ctx, today(t), "утро")
+	if err != nil {
+		t.Fatalf("UsersWithoutPressure() failed: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("UsersWithoutPressure() returned %d users, want 1", len(users))
+	}
+	got := users[0]
+	if got.UserID != 1 || got.ChatID != 42 || got.UserName != "user1" {
+		t.Errorf("UsersWithoutPressure() = %+v, want {1 42 user1}", got)
+	}
+}
+
+func TestRegisterUser_Upsert(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	if err := s.RegisterUser(ctx, 1, 42, "user1"); err != nil {
+		t.Fatalf("RegisterUser() failed: %v", err)
+	}
+	// повторный вызов обновляет chat_id/user_name, дубликат не создаётся
+	if err := s.RegisterUser(ctx, 1, 43, "user_renamed"); err != nil {
+		t.Fatalf("second RegisterUser() failed: %v", err)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		t.Fatalf("count users failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("users count = %d, want 1", count)
+	}
+
+	users, err := s.UsersWithoutPressure(ctx, today(t), "утро")
+	if err != nil {
+		t.Fatalf("UsersWithoutPressure() failed: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("UsersWithoutPressure() returned %d users, want 1", len(users))
+	}
+	got := users[0]
+	if got.ChatID != 43 || got.UserName != "user_renamed" {
+		t.Errorf("UsersWithoutPressure() = %+v, want updated {1 43 user_renamed}", got)
+	}
+}
+
+func TestUsersWithoutPressure(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	// трое зарегистрированных пользователей
+	for _, u := range []struct {
+		id   int64
+		chat int64
+		name string
+	}{
+		{1, 100, "alice"},
+		{2, 200, "bob"},
+		{3, 300, "carol"},
+	} {
+		if err := s.RegisterUser(ctx, u.id, u.chat, u.name); err != nil {
+			t.Fatalf("RegisterUser(%d) failed: %v", u.id, err)
+		}
+	}
+
+	// alice уже передала показания за утро
+	p := &storage.Pressure{
+		Date:      date,
+		DayPart:   "утро",
+		Systolic:  "120",
+		Diastolic: "80",
+		HeartRate: "70",
+		UserID:    1,
+		UserName:  "alice",
+	}
+	if _, err := s.Save(ctx, p); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// legacy-строка без user_id (не принадлежит пользователю, не блокирует)
+	if err := insertLegacy(ctx, s, date, "утро", "130", "85", "75", "alice"); err != nil {
+		t.Fatalf("insertLegacy failed: %v", err)
+	}
+
+	users, err := s.UsersWithoutPressure(ctx, date, "утро")
+	if err != nil {
+		t.Fatalf("UsersWithoutPressure() failed: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("UsersWithoutPressure() returned %d users, want 2", len(users))
+	}
+	if users[0].UserID == 1 || users[1].UserID == 1 {
+		t.Errorf("alice (передала показания) не должна попасть в выборку: %+v", users)
+	}
+}
+
+func TestUsersWithoutPressure_Empty(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	users, err := s.UsersWithoutPressure(ctx, today(t), "вечер")
+	if err != nil {
+		t.Errorf("UsersWithoutPressure() error = %v, want nil", err)
+	}
+	if len(users) != 0 {
+		t.Errorf("UsersWithoutPressure() = %+v, want empty slice", users)
+	}
+}
+
 func TestMigrations_Idempotent(t *testing.T) {
 	s := newTestStorage(t) // первый Init внутри
 	ctx := context.Background()

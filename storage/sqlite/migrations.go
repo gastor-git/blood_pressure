@@ -12,6 +12,7 @@ import (
 var migrations = []func(context.Context, *sql.Tx) error{
 	migration1,
 	migration2,
+	migration3,
 }
 
 // migrate приводит схему к последней версии. Текущая версия хранится в
@@ -96,6 +97,23 @@ func migration2(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("can't run statement %q: %w", q, err)
 		}
+	}
+
+	return nil
+}
+
+// migration3 — таблица пользователей для рассылки напоминаний. Заполняется
+// upsert-ом при каждом входящем сообщении; на неё опирается notifier.
+func migration3(ctx context.Context, tx *sql.Tx) error {
+	q := `CREATE TABLE IF NOT EXISTS users (
+		user_id INTEGER PRIMARY KEY,
+		chat_id INTEGER NOT NULL,
+		user_name TEXT,
+		updated_at TEXT NOT NULL
+	)`
+
+	if _, err := tx.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("can't create users table: %w", err)
 	}
 
 	return nil

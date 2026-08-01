@@ -11,6 +11,9 @@ dc_start:
 dc_stop:
 	docker compose -f ./docker-compose.yml stop
 
+dc_restart:
+	docker compose -f ./docker-compose.yml restart
+
 dc_up:
 	docker compose -f ./docker-compose.yml up -d --remove-orphans
 

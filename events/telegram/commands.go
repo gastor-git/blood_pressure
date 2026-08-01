@@ -81,6 +81,10 @@ func (p *Processor) doCmd(ctx context.Context, text string, chatID int, userID i
 		return err
 	}
 
+	if err := p.storage.RegisterUser(ctx, userID, int64(chatID), username); err != nil {
+		return e.Wrap("не удалось сохранить пользователя", err)
+	}
+
 	if isPressure(text) {
 		return p.savePressure(ctx, chatID, text, userID, username)
 	}
@@ -122,7 +126,7 @@ func (p *Processor) savePressure(ctx context.Context, chatID int, text string, u
 
 	now := timeloc.Now()
 
-	datePart := dayPart(now)
+	datePart := DayPart(now)
 
 	pressures := getPressures(text)
 	if len(pressures) < 3 {
@@ -225,7 +229,8 @@ func (p *Processor) sendHello(ctx context.Context, chatID int) error {
 	return p.tg.SendMessage(ctx, chatID, msgHello)
 }
 
-func dayPart(t time.Time) string {
+// DayPart возвращает метку части суток для времени t.
+func DayPart(t time.Time) string {
 	hour := t.Hour()
 
 	switch {

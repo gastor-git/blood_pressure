@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -126,6 +127,50 @@ func (s *Storage) ClaimLegacy(ctx context.Context, userID int64, userName string
 	}
 
 	return nil
+}
+
+// RegisterUser upsert-ом сохраняет пользователя при каждом входящем сообщении.
+// Если запись уже есть — обновляются chat_id, user_name и updated_at.
+func (s *Storage) RegisterUser(ctx context.Context, userID int64, chatID int64, userName string) error {
+	q := `INSERT INTO users (user_id, chat_id, user_name, updated_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, user_name = excluded.user_name, updated_at = excluded.updated_at`
+
+	if _, err := s.db.ExecContext(ctx, q, userID, chatID, userName, timeloc.Now().Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("can't register user: %w", err)
+	}
+
+	return nil
+}
+
+// UsersWithoutPressure возвращает пользователей, у которых нет записи за
+// дату+часть суток. Legacy-записи с user_id IS NULL не блокируют напоминание:
+// они не принадлежат ни одному зарегистрированному пользователю.
+func (s *Storage) UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]storage.User, error) {
+	q := `SELECT u.user_id, u.chat_id, u.user_name FROM users u
+		WHERE NOT EXISTS (
+			SELECT 1 FROM blood_pressure bp
+			WHERE bp.user_id = u.user_id AND bp.date = ? AND bp.day_part = ?
+		)`
+
+	rows, err := s.db.QueryContext(ctx, q, date, dayPart)
+	if err != nil {
+		return nil, fmt.Errorf("can't get users without pressure: %w", err)
+	}
+	defer rows.Close()
+
+	var users []storage.User
+	for rows.Next() {
+		var u storage.User
+		if err := rows.Scan(&u.UserID, &u.ChatID, &u.UserName); err != nil {
+			return nil, fmt.Errorf("can't get users without pressure: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("can't get users without pressure: %w", err)
+	}
+
+	return users, nil
 }
 
 // Init приводит схему БД к последней версии через механизм миграций.

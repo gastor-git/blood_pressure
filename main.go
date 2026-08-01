@@ -10,6 +10,7 @@ import (
 	tgClient "blood-pressure-bot/clients/telegram"
 	event_consumer "blood-pressure-bot/consumer/event-consumer"
 	"blood-pressure-bot/events/telegram"
+	"blood-pressure-bot/notifier"
 	"blood-pressure-bot/storage/sqlite"
 )
 
@@ -41,6 +42,12 @@ func main() {
 	log.Print("service started")
 
 	consumer := event_consumer.New(eventsProcessor, eventsProcessor, batchSize)
+
+	go func() {
+		if err := notifier.New(s, tgClient.New(tgBotHost, mustToken())).Start(ctx); err != nil {
+			log.Print("notifier stopped: ", err)
+		}
+	}()
 
 	if err := consumer.Start(ctx); err != nil {
 		log.Fatal("service is stopped", err)

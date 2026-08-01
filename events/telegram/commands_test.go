@@ -55,11 +55,16 @@ type mockStorage struct {
 	showFunc        func(ctx context.Context, userID int64) ([]storage.Pressure, error)
 	getAllFunc      func(ctx context.Context, userID int64) ([]storage.Pressure, error)
 	claimLegacyFunc func(ctx context.Context, userID int64, userName string) error
+	registerUser    func(ctx context.Context, userID int64, chatID int64, userName string) error
 
-	saveCalls        int
-	getAllCalls      int
-	claimLegacyCalls int
-	savedPressure    *storage.Pressure
+	saveCalls          int
+	getAllCalls        int
+	claimLegacyCalls   int
+	registerUserCalls  int
+	registeredUserID   int64
+	registeredChatID   int64
+	registeredUserName string
+	savedPressure      *storage.Pressure
 }
 
 func (m *mockStorage) Save(ctx context.Context, p *storage.Pressure) (bool, error) {
@@ -92,6 +97,21 @@ func (m *mockStorage) ClaimLegacy(ctx context.Context, userID int64, userName st
 		return m.claimLegacyFunc(ctx, userID, userName)
 	}
 	return nil
+}
+
+func (m *mockStorage) RegisterUser(ctx context.Context, userID int64, chatID int64, userName string) error {
+	m.registerUserCalls++
+	m.registeredUserID = userID
+	m.registeredChatID = chatID
+	m.registeredUserName = userName
+	if m.registerUser != nil {
+		return m.registerUser(ctx, userID, chatID, userName)
+	}
+	return nil
+}
+
+func (m *mockStorage) UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]storage.User, error) {
+	return nil, nil
 }
 
 // --- tests ---
@@ -202,9 +222,66 @@ func TestDayPart(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if got := dayPart(c.t); got != c.want {
-			t.Errorf("dayPart(%02d:%02d) = %q, want %q", c.t.Hour(), c.t.Minute(), got, c.want)
+		if got := DayPart(c.t); got != c.want {
+			t.Errorf("DayPart(%02d:%02d) = %q, want %q", c.t.Hour(), c.t.Minute(), got, c.want)
 		}
+	}
+}
+
+func TestRegisterUser_CalledOnCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"показания", "120 80 70"},
+		{"команда", ShowCmd},
+		{"неизвестная команда", "/foo"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client := &mockClient{}
+			st := &mockStorage{}
+			p := New(client, st)
+
+			if err := p.doCmd(context.Background(), c.text, 42, 7, "user"); err != nil {
+				t.Fatalf("doCmd returned error: %v", err)
+			}
+
+			if st.registerUserCalls != 1 {
+				t.Fatalf("RegisterUser called %d times, want 1", st.registerUserCalls)
+			}
+			if st.registeredUserID != 7 {
+				t.Errorf("registeredUserID = %d, want 7", st.registeredUserID)
+			}
+			if st.registeredChatID != 42 {
+				t.Errorf("registeredChatID = %d, want 42", st.registeredChatID)
+			}
+			if st.registeredUserName != "user" {
+				t.Errorf("registeredUserName = %q, want %q", st.registeredUserName, "user")
+			}
+		})
+	}
+}
+
+func TestRegisterUser_StorageError(t *testing.T) {
+	sentinel := errors.New("boom")
+	st := &mockStorage{
+		registerUser: func(ctx context.Context, userID int64, chatID int64, userName string) error {
+			return sentinel
+		},
+	}
+	p := New(&mockClient{}, st)
+
+	err := p.doCmd(context.Background(), HelpCmd, 42, 7, "user")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain does not contain sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "не удалось сохранить пользователя") {
+		t.Errorf("error missing wrap prefix: %v", err)
 	}
 }
 
