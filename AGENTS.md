@@ -2,27 +2,28 @@
 
 ## Обзор проекта
 
-Telegram-бот для записи и просмотра показаний артериального давления. Пользователь отправляет сообщение вида `120 80 70` — бот сохраняет систолическое/диастолическое давление и пульс с привязкой к дате и части суток; `/show` выводит показания за сегодня.
+Telegram-бот для записи и просмотра показаний артериального давления. Пользователь отправляет сообщение вида `120 80 70` — бот сохраняет систолическое/диастолическое давление и пульс с привязкой к дате и части суток; `/show` выводит показания за сегодня, `/download` отправляет CSV-файл со всеми показаниями за всё время.
 
 ## Структура репозитория
 
 | Путь | Назначение |
 |---|---|
 | `main.go` | Сборка зависимостей и старт. Путь к БД, хост API и `batchSize` — константы, **не env** |
-| `clients/telegram/telegram.go` | HTTP-клиент Bot API: `Updates`, `SendMessage`, `doRequest`. Методы API — константы `getUpdatesMethod` / `sendMessageMethod` |
+| `clients/telegram/telegram.go` | HTTP-клиент Bot API: `Updates`, `SendMessage`, `SendDocument`, `doRequest`. Методы API — константы `getUpdatesMethod` / `sendMessageMethod` / `sendDocumentMethod`. Общие хелперы `do` (выполнение запроса, проверка HTTP-статуса, `sanitize`) и `checkOK` (поле `ok` → `APIError`); multipart-тело `SendDocument` собирает `multipartBody` |
 | `clients/telegram/types.go` | DTO ответов API (`Update`, `IncomingMessage`, `From`, `Chat`) + поля ошибок API (`ok`, `error_code`, `description`, `parameters.retry_after`), типизированная `APIError` и её билдер `toError` |
 | `events/type.go` | Интерфейсы `Fetcher` / `Processor` (оба принимают `ctx context.Context`), тип `Event` и `Type` |
 | `events/telegram/telegram.go` | `*Processor` — реализует **оба** интерфейса; интерфейс `Client` объявлен на стороне потребителя ради моков |
-| `events/telegram/commands.go` | Роутинг команд, `savePressure`, `show`, `dayPart`, `isPressure`, `getPressures` |
-| `events/telegram/messages.go` | **Все** тексты для пользователя, константы с префиксом `msg` |
+| `events/telegram/commands.go` | Роутинг команд, `savePressure`, `show`, `download`, `dayPart`, `isPressure`, `getPressures` |
+| `events/telegram/csv.go` | Генерация CSV-выгрузки `/download`: `formatCSV` (BOM + CRLF, разделитель `;`, фиксированный порядок утро→день→вечер, пустые ячейки) и `csvFilename` |
+| `events/telegram/messages.go` | **Все** тексты для пользователя, константы с префиксом `msg` (включая шапку CSV `msgCSVHeader`) |
 | `consumer/consumer.go` | Интерфейс `Consumer` с сигнатурой `Start(ctx context.Context) error` |
 | `consumer/event-consumer/` | Пакет `event_consumer`: цикл fetch → process, завершается по отмене `ctx`; `recover` вокруг обработки каждого события |
-| `storage/storage.go` | Интерфейс `Storage` (`Save` / `Show` / `ClaimLegacy`), модель `Pressure` (ключ — `UserID int64`, `UserName` — отображаемый/аудитный) |
-| `storage/sqlite/sqlite.go` | Реализация на SQLite. `New` настраивает пул (`SetMaxOpenConns(1)`) и DSN (`_busy_timeout`, WAL); есть `Close()`. `Save` — `INSERT ... ON CONFLICT DO NOTHING`, признак вставки из `RowsAffected`. `Show()` возвращает `[]storage.Pressure` (форматирование — в `events/telegram`). `Init` вызывает механизм миграций |
+| `storage/storage.go` | Интерфейс `Storage` (`Save` / `Show` / `GetAll` / `ClaimLegacy`), модель `Pressure` (ключ — `UserID int64`, `UserName` — отображаемый/аудитный) |
+| `storage/sqlite/sqlite.go` | Реализация на SQLite. `New` настраивает пул (`SetMaxOpenConns(1)`) и DSN (`_busy_timeout`, WAL); есть `Close()`. `Save` — `INSERT ... ON CONFLICT DO NOTHING`, признак вставки из `RowsAffected`. `Show()`/`GetAll()` возвращают `[]storage.Pressure` (форматирование — в `events/telegram`). `Init` вызывает механизм миграций |
 | `storage/sqlite/migrations.go` | Механизм миграций: срез `migrations []func(ctx, *sql.Tx) error`, версия схемы — `PRAGMA user_version`; каждая миграция в своей транзакции |
 | `lib/e/e.go` | `Wrap` (nil-safe) / `WrapIfErr` — обёртки над `fmt.Errorf("%w")` |
 | `lib/timeloc/timeloc.go` | Единая таймзона учёта (`Asia/Yekaterinburg`) и формат даты; `time.LoadLocation` — один раз при инициализации пакета |
-| `events/telegram/commands_test.go`, `storage/sqlite/sqlite_test.go` | Единственные тестовые файлы |
+| `events/telegram/commands_test.go`, `clients/telegram/telegram_test.go`, `storage/sqlite/sqlite_test.go` | Единственные тестовые файлы |
 | `Makefile` | Таргеты `dc_*` для docker compose и `test` |
 | `Dockerfile`, `docker-compose.yml` | Сборка и запуск контейнера |
 | `.env.dist` | Шаблон окружения (`TG_KEY`, `COMPOSE_PROJECT_NAME`); реальный `.env` в `.gitignore` |
@@ -63,11 +64,11 @@ make dc_down           # ВНИМАНИЕ: сносит volume (-v) и обра�
 - **Ошибки:** в `events/` и `clients/` — `lib/e` через `defer` в начале функции (`defer func() { err = e.WrapIfErr("...", err) }()`), для чего нужны именованные возвращаемые значения. В `storage/sqlite` — напрямую `fmt.Errorf("...: %w", err)`. Sentinel-ошибки объявляются в пакете-владельце и сравниваются через `errors.Is`.
 - **Именование:** пакеты `events/telegram` и `clients/telegram` оба называются `telegram`, поэтому в `main.go` и тестах нужен алиас `tgClient`. Пакет в `consumer/event-consumer` называется `event_consumer` — с подчёркиванием.
 - **Тексты для пользователя — только в `events/telegram/messages.go`**, константы с префиксом `msg`. Тесты сравнивают отправленное именно с этими константами, инлайнить строки нельзя.
-- **Команды бота** — константы `ShowCmd` / `HelpCmd` / `StartCmd` в `commands.go`.
-- `storage/sqlite.Show()` возвращает `[]storage.Pressure`; форматирование строки для пользователя — в `events/telegram` (`formatPressures` + шаблон `msgPressureLine`). При изменении формата чинить `messages.go`, `commands_test.go` (`TestFormatPressures`) и, если правится выборка, `sqlite_test.go`.
+- **Команды бота** — константы `ShowCmd` / `HelpCmd` / `StartCmd` / `DownloadCmd` в `commands.go`.
+- `storage/sqlite.Show()`/`GetAll()` возвращают `[]storage.Pressure`; форматирование строки для пользователя — в `events/telegram`: `formatPressures` + шаблон `msgPressureLine` для `/show`, `formatCSV` + шапка `msgCSVHeader` + `csvFilename` для `/download`. При изменении формата чинить `messages.go`, `csv.go` (если про CSV), `commands_test.go` (`TestFormatPressures` / `TestFormatCSV` / `TestCSVFilename`) и, если правится выборка, `sqlite_test.go`.
 - SQL — только параметризованные запросы (`?`), конкатенация значений в запрос запрещена. **Единственное исключение:** `PRAGMA user_version = N` в `migrations.go` — PRAGMA не поддерживает плейсхолдеры, `N` подставляется через `fmt.Sprintf` из `int`-константы кода (не пользовательский ввод), инъекция невозможна.
-- **`context.Context` пробрасывается сверху вниз** до HTTP и SQL: `Consumer.Start(ctx)` → `Fetch(ctx, …)` / `Process(ctx, …)` → `doCmd(ctx, …)` → `Client.Updates/SendMessage(ctx, …)` и `*Context`-методы `*sql.DB`. `context.Background()` / `context.TODO()` в прод-коде вне `main` запрещены; в `storage/sqlite` — только `QueryContext` / `ExecContext` / `QueryRowContext`.
-- **Ответ Telegram API проверяется дважды**: HTTP-код (`doRequest`) и поле `ok` (`Updates`). Возврат `(nil, nil)` при ошибке API недопустим — ошибка становится `*telegram.APIError` (`error_code` / `description` / `retry_after`).
+- **`context.Context` пробрасывается сверху вниз** до HTTP и SQL: `Consumer.Start(ctx)` → `Fetch(ctx, …)` / `Process(ctx, …)` → `doCmd(ctx, …)` → `Client.Updates/SendMessage/SendDocument(ctx, …)` и `*Context`-методы `*sql.DB`. `context.Background()` / `context.TODO()` в прод-коде вне `main` запрещены; в `storage/sqlite` — только `QueryContext` / `ExecContext` / `QueryRowContext`.
+- **Ответ Telegram API проверяется дважды**: HTTP-код (общий хелпер `do`) и поле `ok` (`checkOK` для `SendDocument`, ручной парсинг в `Updates`). Возврат `(nil, nil)` при ошибке API недопустим — ошибка становится `*telegram.APIError` (`error_code` / `description` / `retry_after`).
 - **Токен не попадает в текст ошибок.** `Client` хранит его в поле `token` и санитизирует любую ошибку (`sanitize` заменяет токен на `***`, сохраняя цепочку через `Unwrap`) перед возвратом. Наружу пробрасываются только санитизированные ошибки клиента.
 - **Регулярные выражения — пакетные `var … = regexp.MustCompile(…)`** (`pressureRe`, `numberRe`), компиляция внутри функции запрещена.
 - `msgError` в `messages.go` — при сбое БД пользователь получает ответ, а не тишину.

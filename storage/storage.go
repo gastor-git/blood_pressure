@@ -7,6 +7,8 @@ type Storage interface {
 	// суток у пользователя уже есть (ON CONFLICT DO NOTHING).
 	Save(ctx context.Context, p *Pressure) (bool, error)
 	Show(ctx context.Context, userID int64) ([]Pressure, error)
+	// GetAll возвращает все показания пользователя за всё время.
+	GetAll(ctx context.Context, userID int64) ([]Pressure, error)
 	// ClaimLegacy привязывает старые записи (user_id IS NULL) к userID по
 	// user_name — ленивый backfill.
 	ClaimLegacy(ctx context.Context, userID int64, userName string) error

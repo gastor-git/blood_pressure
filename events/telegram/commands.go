@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	ShowCmd  = "/show"
-	HelpCmd  = "/help"
-	StartCmd = "/start"
+	ShowCmd     = "/show"
+	HelpCmd     = "/help"
+	StartCmd    = "/start"
+	DownloadCmd = "/download"
 )
 
 const (
@@ -87,6 +88,8 @@ func (p *Processor) doCmd(ctx context.Context, text string, chatID int, userID i
 	switch text {
 	case ShowCmd:
 		return p.show(ctx, chatID, userID)
+	case DownloadCmd:
+		return p.download(ctx, chatID, userID, username)
 	case HelpCmd:
 		return p.sendHelp(ctx, chatID)
 	case StartCmd:
@@ -185,6 +188,23 @@ func (p *Processor) show(ctx context.Context, chatID int, userID int64) (err err
 	}
 
 	return p.tg.SendMessage(ctx, chatID, formatPressures(res))
+}
+
+// download формирует CSV-файл с показаниями за всё время и отправляет его.
+func (p *Processor) download(ctx context.Context, chatID int, userID int64, username string) (err error) {
+	defer func() { err = e.WrapIfErr("Ошибка при выполнении команды: download", err) }()
+
+	pressures, err := p.storage.GetAll(ctx, userID)
+	if err != nil {
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
+		return err
+	}
+
+	if len(pressures) == 0 {
+		return p.tg.SendMessage(ctx, chatID, msgNoSavedPressure)
+	}
+
+	return p.tg.SendDocument(ctx, chatID, csvFilename(username), []byte(formatCSV(pressures)))
 }
 
 // formatPressures собирает пользовательский текст из показаний.

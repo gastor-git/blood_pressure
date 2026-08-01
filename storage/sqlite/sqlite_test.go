@@ -189,6 +189,68 @@ func TestShow_Empty(t *testing.T) {
 	}
 }
 
+func TestGetAll_AllTime(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	// записи за разные даты (включая не-сегодняшнюю)
+	for _, d := range []string{"2000-01-01", "2000-01-02", today(t)} {
+		p := &storage.Pressure{Date: d, DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1, UserName: "user1"}
+		if _, err := s.Save(ctx, p); err != nil {
+			t.Fatalf("Save() failed: %v", err)
+		}
+	}
+
+	res, err := s.GetAll(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("GetAll() returned %d rows, want 3", len(res))
+	}
+	// упорядочены по дате (лексикографически = хронологически)
+	for i, d := range []string{"2000-01-01", "2000-01-02", today(t)} {
+		if res[i].Date != d {
+			t.Errorf("res[%d].Date = %q, want %q", i, res[i].Date, d)
+		}
+	}
+}
+
+func TestGetAll_ByUser(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	p1 := &storage.Pressure{Date: "2000-01-01", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1}
+	p2 := &storage.Pressure{Date: "2000-01-01", DayPart: "утро", Systolic: "130", Diastolic: "85", HeartRate: "75", UserID: 2}
+
+	if _, err := s.Save(ctx, p1); err != nil {
+		t.Fatalf("Save(p1) failed: %v", err)
+	}
+	if _, err := s.Save(ctx, p2); err != nil {
+		t.Fatalf("Save(p2) failed: %v", err)
+	}
+
+	res, err := s.GetAll(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(res) != 1 || res[0].Systolic != "120" {
+		t.Errorf("GetAll(1) = %+v, want single record 120/...", res)
+	}
+}
+
+func TestGetAll_Empty(t *testing.T) {
+	s := newTestStorage(t)
+
+	res, err := s.GetAll(context.Background(), 999)
+	if err != nil {
+		t.Errorf("GetAll() error = %v, want nil", err)
+	}
+	if len(res) != 0 {
+		t.Errorf("GetAll() = %+v, want empty slice", res)
+	}
+}
+
 func TestClaimLegacy(t *testing.T) {
 	s := newTestStorage(t)
 	ctx := context.Background()

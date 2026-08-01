@@ -89,6 +89,32 @@ func (s *Storage) Show(ctx context.Context, userID int64) ([]storage.Pressure, e
 	return pressures, nil
 }
 
+// GetAll возвращает все показания пользователя за всё время. Дата в формате
+// 2006-01-02 сортируется лексикографически, то есть хронологически.
+func (s *Storage) GetAll(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+	q := `SELECT date, day_part, systolic, diastolic, heart_rate, user_id, user_name FROM blood_pressure WHERE user_id = ? ORDER BY date`
+	rows, err := s.db.QueryContext(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("can't get all pressures: %w", err)
+	}
+	defer rows.Close()
+
+	var pressures []storage.Pressure
+	for rows.Next() {
+		var p storage.Pressure
+		err := rows.Scan(&p.Date, &p.DayPart, &p.Systolic, &p.Diastolic, &p.HeartRate, &p.UserID, &p.UserName)
+		if err != nil {
+			return nil, fmt.Errorf("can't get all pressures: %w", err)
+		}
+		pressures = append(pressures, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("can't get all pressures: %w", err)
+	}
+
+	return pressures, nil
+}
+
 // ClaimLegacy привязывает старые записи (user_id IS NULL) к userID по user_name.
 // OR IGNORE защищает от конфликта с уникальным индексом: неперенесённые
 // остатки остаются невидимыми, но запись не ломают.

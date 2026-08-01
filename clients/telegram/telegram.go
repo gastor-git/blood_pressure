@@ -1,10 +1,12 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,8 +25,9 @@ type Client struct {
 }
 
 const (
-	getUpdatesMethod  = "getUpdates"
-	sendMessageMethod = "sendMessage"
+	getUpdatesMethod   = "getUpdates"
+	sendMessageMethod  = "sendMessage"
+	sendDocumentMethod = "sendDocument"
 
 	// longPollTimeout — время удержания соединения getUpdates на стороне Telegram.
 	longPollTimeout = 25
@@ -86,11 +89,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int, text string) error
 }
 
 func (c *Client) doRequest(ctx context.Context, method string, query url.Values) (data []byte, err error) {
-	defer func() {
-		if err != nil {
-			err = e.Wrap("can't do request", c.sanitize(err))
-		}
-	}()
+	defer func() { err = e.WrapIfErr("can't do request", err) }()
 
 	u := url.URL{
 		Scheme: "https",
@@ -104,6 +103,71 @@ func (c *Client) doRequest(ctx context.Context, method string, query url.Values)
 	}
 
 	req.URL.RawQuery = query.Encode()
+
+	return c.do(ctx, req)
+}
+
+func (c *Client) SendDocument(ctx context.Context, chatID int, filename string, data []byte) (err error) {
+	defer func() { err = e.WrapIfErr("can't send document", err) }()
+
+	body, contentType, err := multipartBody(chatID, filename, data)
+	if err != nil {
+		return err
+	}
+
+	u := url.URL{
+		Scheme: "https",
+		Host:   c.host,
+		Path:   path.Join(c.basePath, sendDocumentMethod),
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", contentType)
+
+	respBody, err := c.do(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	return checkOK(respBody)
+}
+
+// multipartBody собирает тело multipart/form-data: поле chat_id и файл document.
+func multipartBody(chatID int, filename string, data []byte) (io.Reader, string, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	if err := w.WriteField("chat_id", strconv.Itoa(chatID)); err != nil {
+		return nil, "", err
+	}
+
+	part, err := w.CreateFormFile("document", filename)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if _, err := part.Write(data); err != nil {
+		return nil, "", err
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
+
+	return &buf, w.FormDataContentType(), nil
+}
+
+// do выполняет HTTP-запрос, читает тело и проверяет HTTP-статус. Все ошибки
+// проходят через sanitize, чтобы токен не утёк наружу.
+func (c *Client) do(ctx context.Context, req *http.Request) (data []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = c.sanitize(err)
+		}
+	}()
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -121,6 +185,20 @@ func (c *Client) doRequest(ctx context.Context, method string, query url.Values)
 	}
 
 	return body, nil
+}
+
+// checkOK проверяет поле ok ответа Telegram API и возвращает APIError при ok:false.
+func checkOK(data []byte) error {
+	var res UpdatesResponse
+	if err := json.Unmarshal(data, &res); err != nil {
+		return err
+	}
+
+	if !res.Ok {
+		return res.toError()
+	}
+
+	return nil
 }
 
 // statusError разбирает тело ошибочного ответа в APIError; токена в теле нет.

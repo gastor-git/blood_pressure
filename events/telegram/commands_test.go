@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tgClient "blood-pressure-bot/clients/telegram"
+	"blood-pressure-bot/lib/timeloc"
 	"blood-pressure-bot/storage"
 )
 
@@ -18,6 +19,11 @@ type mockClient struct {
 	sentChatID int
 	sentTexts  []string
 	sendErr    error
+
+	sendDocCalled bool
+	sentFilename  string
+	sentData      []byte
+	sendDocErr    error
 }
 
 func (m *mockClient) Updates(ctx context.Context, offset, limit int) ([]tgClient.Update, error) {
@@ -33,12 +39,25 @@ func (m *mockClient) SendMessage(ctx context.Context, chatID int, text string) e
 	return nil
 }
 
+func (m *mockClient) SendDocument(ctx context.Context, chatID int, filename string, data []byte) error {
+	m.sendDocCalled = true
+	m.sentChatID = chatID
+	m.sentFilename = filename
+	m.sentData = data
+	if m.sendDocErr != nil {
+		return m.sendDocErr
+	}
+	return nil
+}
+
 type mockStorage struct {
 	saveFunc        func(ctx context.Context, p *storage.Pressure) (bool, error)
 	showFunc        func(ctx context.Context, userID int64) ([]storage.Pressure, error)
+	getAllFunc      func(ctx context.Context, userID int64) ([]storage.Pressure, error)
 	claimLegacyFunc func(ctx context.Context, userID int64, userName string) error
 
 	saveCalls        int
+	getAllCalls      int
 	claimLegacyCalls int
 	savedPressure    *storage.Pressure
 }
@@ -55,6 +74,14 @@ func (m *mockStorage) Save(ctx context.Context, p *storage.Pressure) (bool, erro
 func (m *mockStorage) Show(ctx context.Context, userID int64) ([]storage.Pressure, error) {
 	if m.showFunc != nil {
 		return m.showFunc(ctx, userID)
+	}
+	return nil, nil
+}
+
+func (m *mockStorage) GetAll(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+	m.getAllCalls++
+	if m.getAllFunc != nil {
+		return m.getAllFunc(ctx, userID)
 	}
 	return nil, nil
 }
@@ -191,6 +218,7 @@ func TestDoCmd_Routing(t *testing.T) {
 		{"start", StartCmd, msgHello},
 		{"unknown", "/foo", msgUnknownCommand},
 		{"help with spaces", "  /help  ", msgHelp},
+		{"download", DownloadCmd, msgNoSavedPressure},
 	}
 
 	for _, c := range cases {
@@ -365,6 +393,172 @@ func TestFormatPressures(t *testing.T) {
 				t.Errorf("formatPressures() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestDownload_Empty(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		getAllFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+			return nil, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := p.doCmd(context.Background(), DownloadCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgNoSavedPressure {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgNoSavedPressure)
+	}
+	if client.sendDocCalled {
+		t.Error("SendDocument called, want not")
+	}
+}
+
+func TestDownload_WithData(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		getAllFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+			return []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
+				{Date: "2026-01-03", DayPart: "день", Systolic: "140", Diastolic: "90", HeartRate: "80"},
+			}, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := p.doCmd(context.Background(), DownloadCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if !client.sendDocCalled {
+		t.Fatal("SendDocument not called")
+	}
+	if client.sentChatID != 42 {
+		t.Errorf("chatID = %d, want 42", client.sentChatID)
+	}
+	wantName := "user_" + timeloc.Now().Format(timeloc.DateFormat) + ".csv"
+	if client.sentFilename != wantName {
+		t.Errorf("sentFilename = %q, want %q", client.sentFilename, wantName)
+	}
+
+	want := "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
+		"2026-01-02;120;80;70;;;;130;85;75\r\n" +
+		"2026-01-03;;;;140;90;80;;;\r\n"
+	if string(client.sentData) != want {
+		t.Errorf("CSV = %q, want %q", client.sentData, want)
+	}
+}
+
+func TestDownload_EmptyUsername(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		getAllFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+			return []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+			}, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := p.doCmd(context.Background(), DownloadCmd, 42, 7, ""); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if !client.sendDocCalled {
+		t.Fatal("SendDocument not called")
+	}
+	if !strings.HasPrefix(client.sentFilename, "user_") {
+		t.Errorf("sentFilename = %q, want prefix user_", client.sentFilename)
+	}
+}
+
+func TestDownload_StorageError(t *testing.T) {
+	sentinel := errors.New("boom")
+	client := &mockClient{}
+	st := &mockStorage{
+		getAllFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+			return nil, sentinel
+		},
+	}
+	p := New(client, st)
+
+	err := p.doCmd(context.Background(), DownloadCmd, 42, 7, "user")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain does not contain sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Ошибка при выполнении команды: download") {
+		t.Errorf("error missing wrap prefix: %v", err)
+	}
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgError {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgError)
+	}
+	if client.sendDocCalled {
+		t.Error("SendDocument called, want not")
+	}
+}
+
+func TestFormatCSV(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []storage.Pressure
+		want string
+	}{
+		{
+			name: "одна дата, три части суток",
+			in: []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+				{Date: "2026-01-02", DayPart: "день", Systolic: "125", Diastolic: "82", HeartRate: "72"},
+				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
+			},
+			want: "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
+				"2026-01-02;120;80;70;125;82;72;130;85;75\r\n",
+		},
+		{
+			name: "частичная — пустые ячейки",
+			in: []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+			},
+			want: "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
+				"2026-01-02;120;80;70;;;;;;\r\n",
+		},
+		{
+			name: "порядок дат и частей суток",
+			in: []storage.Pressure{
+				{Date: "2026-01-03", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
+				{Date: "2026-01-02", DayPart: "вечер", Systolic: "135", Diastolic: "88", HeartRate: "78"},
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+				{Date: "2026-01-02", DayPart: "день", Systolic: "125", Diastolic: "82", HeartRate: "72"},
+			},
+			want: "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
+				"2026-01-02;120;80;70;125;82;72;135;88;78\r\n" +
+				"2026-01-03;;;;;;;130;85;75\r\n",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatCSV(c.in); got != c.want {
+				t.Errorf("formatCSV() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestCSVFilename(t *testing.T) {
+	today := timeloc.Now().Format(timeloc.DateFormat)
+
+	if got := csvFilename("alice"); got != "alice_"+today+".csv" {
+		t.Errorf("csvFilename(alice) = %q, want %q", got, "alice_"+today+".csv")
+	}
+	if got := csvFilename(""); got != "user_"+today+".csv" {
+		t.Errorf("csvFilename(\"\") = %q, want %q", got, "user_"+today+".csv")
 	}
 }
 

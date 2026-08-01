@@ -13,6 +13,7 @@ import (
 type Client interface {
 	Updates(ctx context.Context, offset, limit int) ([]telegram.Update, error)
 	SendMessage(ctx context.Context, chatID int, text string) error
+	SendDocument(ctx context.Context, chatID int, filename string, data []byte) error
 }
 
 type Processor struct {
