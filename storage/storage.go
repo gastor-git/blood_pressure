@@ -1,19 +1,12 @@
 package storage
 
-import (
-	"context"
-	"errors"
-)
+import "context"
 
 type Storage interface {
 	Save(ctx context.Context, p *Pressure) error
 	Show(ctx context.Context, userName string) (string, error)
-	Remove(ctx context.Context, p *Pressure) error
 	IsExists(ctx context.Context, p *Pressure) (bool, error)
 }
-
-var ErrNoSavedPages = errors.New("no saved pages")
-var ErrNoSavedPressure = errors.New("нет показаний за сегодня")
 
 type Pressure struct {
 	Date      string

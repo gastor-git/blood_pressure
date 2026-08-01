@@ -1,5 +1,7 @@
 package consumer
 
+import "context"
+
 type Consumer interface {
-	Start() error
+	Start(ctx context.Context) error
 }

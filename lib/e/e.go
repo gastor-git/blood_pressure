@@ -1,8 +1,15 @@
 package e
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 func Wrap(msg string, err error) error {
+	if err == nil {
+		return errors.New(msg)
+	}
+
 	return fmt.Errorf("%s: %w", msg, err)
 }
 

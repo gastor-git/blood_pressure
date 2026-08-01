@@ -20,11 +20,11 @@ type mockClient struct {
 	sendErr    error
 }
 
-func (m *mockClient) Updates(offset, limit int) ([]tgClient.Update, error) {
+func (m *mockClient) Updates(ctx context.Context, offset, limit int) ([]tgClient.Update, error) {
 	return nil, nil
 }
 
-func (m *mockClient) SendMessage(chatID int, text string) error {
+func (m *mockClient) SendMessage(ctx context.Context, chatID int, text string) error {
 	if m.sendErr != nil {
 		return m.sendErr
 	}
@@ -152,7 +152,7 @@ func TestDoCmd_Routing(t *testing.T) {
 			client := &mockClient{}
 			p := New(client, &mockStorage{})
 
-			if err := p.doCmd(c.text, 42, "user"); err != nil {
+			if err := p.doCmd(context.Background(), c.text, 42, "user"); err != nil {
 				t.Fatalf("doCmd returned error: %v", err)
 			}
 
@@ -178,7 +178,7 @@ func TestSavePressure_New(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := p.doCmd("120 80 70", 42, "user"); err != nil {
+	if err := p.doCmd(context.Background(), "120 80 70", 42, "user"); err != nil {
 		t.Fatalf("doCmd returned error: %v", err)
 	}
 
@@ -208,7 +208,7 @@ func TestSavePressure_Duplicate(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := p.doCmd("120 80 70", 42, "user"); err != nil {
+	if err := p.doCmd(context.Background(), "120 80 70", 42, "user"); err != nil {
 		t.Fatalf("doCmd returned error: %v", err)
 	}
 
@@ -232,7 +232,7 @@ func TestSavePressure_StorageError(t *testing.T) {
 	}
 	p := New(&mockClient{}, st)
 
-	err := p.doCmd("120 80 70", 42, "user")
+	err := p.doCmd(context.Background(), "120 80 70", 42, "user")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -253,7 +253,7 @@ func TestShow_Empty(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := p.doCmd(ShowCmd, 42, "user"); err != nil {
+	if err := p.doCmd(context.Background(), ShowCmd, 42, "user"); err != nil {
 		t.Fatalf("doCmd returned error: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestShow_WithData(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := p.doCmd(ShowCmd, 42, "user"); err != nil {
+	if err := p.doCmd(context.Background(), ShowCmd, 42, "user"); err != nil {
 		t.Fatalf("doCmd returned error: %v", err)
 	}
 

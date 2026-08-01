@@ -3,8 +3,10 @@
 blood-pressure-bot
 .env
 
-# БД
+# БД (включая WAL/SHM, появляющиеся в режиме _journal_mode=WAL)
 *.db
+*.db-wal
+*.db-shm
 
 # Временные файлы
 *.test

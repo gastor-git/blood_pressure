@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"blood-pressure-bot/lib/e"
+	"blood-pressure-bot/lib/timeloc"
 	"blood-pressure-bot/storage"
 )
 
@@ -18,44 +19,51 @@ const (
 	StartCmd = "/start"
 )
 
-func (p *Processor) doCmd(text string, chatID int, username string) error {
+var (
+	pressureRe = regexp.MustCompile(`^\d{2,3} \d{2,3} \d{2,3}$`)
+	numberRe   = regexp.MustCompile(`\d+`)
+)
+
+// ErrInvalidPressure — защита от рассинхронизации isPressure и getPressures.
+var ErrInvalidPressure = errors.New("неверный формат показаний давления")
+
+func (p *Processor) doCmd(ctx context.Context, text string, chatID int, username string) error {
 	text = strings.TrimSpace(text)
 
-	log.Printf("got new command '%s' from '%s", text, username)
+	log.Printf("got new command '%s' from '%s'", text, username)
 
 	if isPressure(text) {
-		return p.savePressure(chatID, text, username)
+		return p.savePressure(ctx, chatID, text, username)
 	}
 
 	switch text {
 	case ShowCmd:
-		return p.show(chatID, username)
+		return p.show(ctx, chatID, username)
 	case HelpCmd:
-		return p.sendHelp(chatID)
+		return p.sendHelp(ctx, chatID)
 	case StartCmd:
-		return p.sendHello(chatID)
+		return p.sendHello(ctx, chatID)
 	default:
-		return p.tg.SendMessage(chatID, msgUnknownCommand)
+		return p.tg.SendMessage(ctx, chatID, msgUnknownCommand)
 	}
 }
 
-func (p *Processor) savePressure(chatID int, text string, username string) (err error) {
+func (p *Processor) savePressure(ctx context.Context, chatID int, text string, username string) (err error) {
 	defer func() {
 		err = e.WrapIfErr("Ошибка при сохранении показаний давления", err)
 	}()
 
-	loc, err := time.LoadLocation("Asia/Yekaterinburg")
-	if err != nil {
-		return err
-	}
-	now := time.Now().In(loc)
+	now := timeloc.Now()
 
 	datePart := dayPart(now)
 
 	pressures := getPressures(text)
+	if len(pressures) < 3 {
+		return ErrInvalidPressure
+	}
 
 	pressure := &storage.Pressure{
-		Date:      now.Format("2006-01-02"),
+		Date:      now.Format(timeloc.DateFormat),
 		DayPart:   datePart,
 		Systolic:  pressures[0],
 		Diastolic: pressures[1],
@@ -63,51 +71,49 @@ func (p *Processor) savePressure(chatID int, text string, username string) (err 
 		UserName:  username,
 	}
 
-	isExists, err := p.storage.IsExists(context.Background(), pressure)
+	isExists, err := p.storage.IsExists(ctx, pressure)
 	if err != nil {
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
 		return err
 	}
 	if isExists {
-		return p.tg.SendMessage(chatID, msgAlreadyExists)
+		return p.tg.SendMessage(ctx, chatID, msgAlreadyExists)
 	}
 
-	if err := p.storage.Save(context.Background(), pressure); err != nil {
+	if err := p.storage.Save(ctx, pressure); err != nil {
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
 		return err
 	}
 
-	if err := p.tg.SendMessage(chatID, msgSaved); err != nil {
+	if err := p.tg.SendMessage(ctx, chatID, msgSaved); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (p *Processor) show(chatID int, username string) (err error) {
+func (p *Processor) show(ctx context.Context, chatID int, username string) (err error) {
 	defer func() { err = e.WrapIfErr("Ошибка при выполнении команды: show", err) }()
 
-	msg, err := p.storage.Show(context.Background(), username)
-
-	if err != nil && !errors.Is(err, storage.ErrNoSavedPressure) {
+	msg, err := p.storage.Show(ctx, username)
+	if err != nil {
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
 		return err
 	}
 
-	if errors.Is(err, storage.ErrNoSavedPressure) || msg == "" {
-		return p.tg.SendMessage(chatID, msgNoSavedPressure)
+	if msg == "" {
+		return p.tg.SendMessage(ctx, chatID, msgNoSavedPressure)
 	}
 
-	if err := p.tg.SendMessage(chatID, msg); err != nil {
-		return err
-	}
-
-	return nil
+	return p.tg.SendMessage(ctx, chatID, msg)
 }
 
-func (p *Processor) sendHelp(chatID int) error {
-	return p.tg.SendMessage(chatID, msgHelp)
+func (p *Processor) sendHelp(ctx context.Context, chatID int) error {
+	return p.tg.SendMessage(ctx, chatID, msgHelp)
 }
 
-func (p *Processor) sendHello(chatID int) error {
-	return p.tg.SendMessage(chatID, msgHello)
+func (p *Processor) sendHello(ctx context.Context, chatID int) error {
+	return p.tg.SendMessage(ctx, chatID, msgHello)
 }
 
 func dayPart(t time.Time) string {
@@ -123,16 +129,9 @@ func dayPart(t time.Time) string {
 }
 
 func isPressure(text string) bool {
-	matched, err := regexp.MatchString(`^\d{2,3} \d{2,3} \d{2,3}$`, text)
-
-	return err == nil && matched
+	return pressureRe.MatchString(text)
 }
 
 func getPressures(text string) []string {
-	re := regexp.MustCompile(`\d+`)
-
-	// Найти все совпадения
-	matches := re.FindAllString(text, -1)
-
-	return matches
+	return numberRe.FindAllString(text, -1)
 }

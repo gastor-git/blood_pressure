@@ -25,13 +25,6 @@ dc_down:
 
 
 ##################
-# App
-##################
-
-app_bash:
-	docker compose -f ./docker-compose.yml exec /bin/bash
-
-##################
 # Tests
 ##################
 
