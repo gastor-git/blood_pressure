@@ -523,8 +523,8 @@ func TestDownload_WithData(t *testing.T) {
 	}
 
 	want := "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
-		"02.01.2026;120;80;70;;;;130;85;75\r\n" +
-		"03.01.2026;;;;140;90;80;;;\r\n"
+		"02.01.2026;120/80/70;;130/85/75\r\n" +
+		"03.01.2026;;140/90/80;\r\n"
 	if string(client.sentData) != want {
 		t.Errorf("CSV = %q, want %q", client.sentData, want)
 	}
@@ -595,7 +595,7 @@ func TestFormatCSV(t *testing.T) {
 				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
 			},
 			want: "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
-				"02.01.2026;120;80;70;125;82;72;130;85;75\r\n",
+				"02.01.2026;120/80/70;125/82/72;130/85/75\r\n",
 		},
 		{
 			name: "частичная — пустые ячейки",
@@ -603,7 +603,7 @@ func TestFormatCSV(t *testing.T) {
 				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
 			},
 			want: "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
-				"02.01.2026;120;80;70;;;;;;\r\n",
+				"02.01.2026;120/80/70;;\r\n",
 		},
 		{
 			name: "порядок дат и частей суток",
@@ -614,8 +614,8 @@ func TestFormatCSV(t *testing.T) {
 				{Date: "2026-01-02", DayPart: "день", Systolic: "125", Diastolic: "82", HeartRate: "72"},
 			},
 			want: "\xEF\xBB\xBF" + msgCSVHeader + "\r\n" +
-				"02.01.2026;120;80;70;125;82;72;135;88;78\r\n" +
-				"03.01.2026;;;;;;;130;85;75\r\n",
+				"02.01.2026;120/80/70;125/82/72;135/88/78\r\n" +
+				"03.01.2026;;;130/85/75\r\n",
 		},
 	}
 

@@ -38,9 +38,9 @@ func formatCSV(pressures []storage.Pressure) string {
 		fields := []string{formatCSVDate(date)}
 		for _, part := range csvOrder {
 			if p, ok := byDate[date][part]; ok {
-				fields = append(fields, p.Systolic, p.Diastolic, p.HeartRate)
+				fields = append(fields, p.Systolic+"/"+p.Diastolic+"/"+p.HeartRate)
 			} else {
-				fields = append(fields, "", "", "")
+				fields = append(fields, "")
 			}
 		}
 		b.WriteString(strings.Join(fields, ";"))

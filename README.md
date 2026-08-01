@@ -14,7 +14,7 @@ Telegram-бот для записи и просмотра показаний а�
 | `events/type.go` | Интерфейсы `Fetcher` / `Processor` (оба принимают `ctx context.Context`), тип `Event` и `Type` |
 | `events/telegram/telegram.go` | `*Processor` — реализует **оба** интерфейса; интерфейс `Client` объявлен на стороне потребителя ради моков |
 | `events/telegram/commands.go` | Роутинг команд, `savePressure`, `show`, `download`, `DayPart`, `isPressure`, `getPressures`. Вызов `storage.RegisterUser` в `doCmd` при каждом сообщении |
-| `events/telegram/csv.go` | Генерация CSV-выгрузки `/download`: `formatCSV` (BOM + CRLF, разделитель `;`, фиксированный порядок утро→день→вечер, пустые ячейки) и `csvFilename` |
+| `events/telegram/csv.go` | Генерация CSV-выгрузки `/download`: `formatCSV` (BOM + CRLF, разделитель `;`, фиксированный порядок утро→день→вечер, значения показаний как `систолическое/диастолическое/пульс`, пустые ячейки) и `csvFilename` |
 | `events/telegram/messages.go` | **Все** тексты для пользователя, константы с префиксом `msg` (включая шапку CSV `msgCSVHeader`). `MsgReminder` — единственная экспортированная, нужна пакету `notifier` |
 | `consumer/consumer.go` | Интерфейс `Consumer` с сигнатурой `Start(ctx context.Context) error` |
 | `consumer/event-consumer/` | Пакет `event_consumer`: цикл fetch → process, завершается по отмене `ctx`; `recover` вокруг обработки каждого события |
