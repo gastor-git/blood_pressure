@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -307,14 +308,33 @@ func (p *Processor) download(ctx context.Context, chatID int, userID int64, user
 	return p.tg.SendDocument(ctx, chatID, csvFilename(username), []byte(formatCSV(pressures)))
 }
 
-// formatPressures собирает пользовательский текст из показаний.
+// formatPressures собирает пользовательский текст из показаний, сортируя их
+// по части суток: сначала Утро, потом День, потом Вечер.
 func formatPressures(pressures []storage.Pressure) string {
+	sort.SliceStable(pressures, func(i, j int) bool {
+		return dayPartIndex(pressures[i].DayPart) < dayPartIndex(pressures[j].DayPart)
+	})
+
 	var b strings.Builder
 	for _, p := range pressures {
 		fmt.Fprintf(&b, msgPressureLine, formatCSVDate(p.Date), p.DayPart, p.Systolic, p.Diastolic, p.HeartRate)
 	}
 
 	return b.String()
+}
+
+// dayPartIndex возвращает порядковый номер части суток для сортировки вывода /show.
+func dayPartIndex(part string) int {
+	switch part {
+	case dayPartMorning:
+		return 0
+	case dayPartDay:
+		return 1
+	case dayPartEvening:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func (p *Processor) sendHelp(ctx context.Context, chatID int) error {

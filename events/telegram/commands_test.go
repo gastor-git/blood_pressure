@@ -486,29 +486,49 @@ func TestShow_Empty(t *testing.T) {
 }
 
 func TestShow_WithData(t *testing.T) {
-	client := &mockClient{}
-	const data = "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n"
-	st := &mockStorage{
-		showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
-			return []storage.Pressure{
-				{
-					Date:      "2026-01-02",
-					DayPart:   "утро",
-					Systolic:  "120",
-					Diastolic: "80",
-					HeartRate: "70",
-				},
-			}, nil
+	cases := []struct {
+		name string
+		show []storage.Pressure
+		want string
+	}{
+		{
+			name: "одна запись",
+			show: []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+			},
+			want: "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n",
+		},
+		{
+			name: "сортировка по части суток утро→день→вечер",
+			show: []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+				{Date: "2026-01-02", DayPart: "день", Systolic: "125", Diastolic: "82", HeartRate: "72"},
+			},
+			want: "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n" +
+				"Дата: 02.01.2026, часть суток: день, показания: 125/82/72\n\n" +
+				"Дата: 02.01.2026, часть суток: вечер, показания: 130/85/75\n\n",
 		},
 	}
-	p := New(client, st)
 
-	if err := p.doCmd(context.Background(), ShowCmd, 42, 7, "user"); err != nil {
-		t.Fatalf("doCmd returned error: %v", err)
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client := &mockClient{}
+			st := &mockStorage{
+				showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+					return c.show, nil
+				},
+			}
+			p := New(client, st)
 
-	if len(client.sentTexts) != 1 || client.sentTexts[0] != data {
-		t.Errorf("sent %v, want [%q]", client.sentTexts, data)
+			if err := p.doCmd(context.Background(), ShowCmd, 42, 7, "user"); err != nil {
+				t.Fatalf("doCmd returned error: %v", err)
+			}
+
+			if len(client.sentTexts) != 1 || client.sentTexts[0] != c.want {
+				t.Errorf("sent %v, want [%q]", client.sentTexts, c.want)
+			}
+		})
 	}
 }
 
@@ -532,6 +552,17 @@ func TestFormatPressures(t *testing.T) {
 				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
 			},
 			want: "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n" +
+				"Дата: 02.01.2026, часть суток: вечер, показания: 130/85/75\n\n",
+		},
+		{
+			name: "сортировка по части суток утро→день→вечер",
+			in: []storage.Pressure{
+				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
+				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
+				{Date: "2026-01-02", DayPart: "день", Systolic: "125", Diastolic: "82", HeartRate: "72"},
+			},
+			want: "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n" +
+				"Дата: 02.01.2026, часть суток: день, показания: 125/82/72\n\n" +
 				"Дата: 02.01.2026, часть суток: вечер, показания: 130/85/75\n\n",
 		},
 	}
