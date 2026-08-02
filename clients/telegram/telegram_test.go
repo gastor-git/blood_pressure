@@ -125,3 +125,43 @@ func TestSendDocument_NonOKStatus(t *testing.T) {
 		t.Errorf("apiErr.Code = %d, want 500", apiErr.Code)
 	}
 }
+
+func TestSendKeyboard(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/"+sendMessageMethod) {
+			t.Errorf("path = %s, want suffix /%s", r.URL.Path, sendMessageMethod)
+		}
+		if got := r.URL.Query().Get("chat_id"); got != "42" {
+			t.Errorf("chat_id = %q, want 42", got)
+		}
+		if got := r.URL.Query().Get("text"); got != "prompt" {
+			t.Errorf("text = %q, want prompt", got)
+		}
+		want := `{"keyboard":[["7","8","9"],["4","5","6"],["1","2","3"],["0","⌫","Готово"]],"resize_keyboard":true,"one_time_keyboard":false}`
+		if got := r.URL.Query().Get("reply_markup"); got != want {
+			t.Errorf("reply_markup = %s, want %s", got, want)
+		}
+
+		_, _ = io.WriteString(w, `{"ok":true,"result":null}`)
+	}))
+
+	keyboard := [][]string{{"7", "8", "9"}, {"4", "5", "6"}, {"1", "2", "3"}, {"0", "⌫", "Готово"}}
+	if err := c.SendKeyboard(context.Background(), 42, "prompt", keyboard, false); err != nil {
+		t.Fatalf("SendKeyboard() failed: %v", err)
+	}
+}
+
+func TestRemoveKeyboard(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := `{"remove_keyboard":true}`
+		if got := r.URL.Query().Get("reply_markup"); got != want {
+			t.Errorf("reply_markup = %s, want %s", got, want)
+		}
+
+		_, _ = io.WriteString(w, `{"ok":true,"result":null}`)
+	}))
+
+	if err := c.RemoveKeyboard(context.Background(), 42, "done"); err != nil {
+		t.Fatalf("RemoveKeyboard() failed: %v", err)
+	}
+}

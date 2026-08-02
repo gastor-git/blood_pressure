@@ -77,12 +77,53 @@ func (c *Client) Updates(ctx context.Context, offset int, limit int) (updates []
 }
 
 func (c *Client) SendMessage(ctx context.Context, chatID int, text string) error {
+	return c.sendMessage(ctx, chatID, text, "")
+}
+
+// SendKeyboard отправляет сообщение с кастомной reply-клавиатурой. При
+// oneTime=true клавиатура скрывается после первого нажатия.
+func (c *Client) SendKeyboard(ctx context.Context, chatID int, text string, keyboard [][]string, oneTime bool) (err error) {
+	defer func() { err = e.WrapIfErr("can't send keyboard", err) }()
+
+	markup := ReplyKeyboardMarkup{
+		Keyboard:        keyboard,
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: oneTime,
+	}
+
+	encoded, err := json.Marshal(markup)
+	if err != nil {
+		return err
+	}
+
+	return c.sendMessage(ctx, chatID, text, string(encoded))
+}
+
+// RemoveKeyboard отправляет сообщение и скрывает reply-клавиатуру.
+func (c *Client) RemoveKeyboard(ctx context.Context, chatID int, text string) (err error) {
+	defer func() { err = e.WrapIfErr("can't remove keyboard", err) }()
+
+	encoded, err := json.Marshal(ReplyKeyboardRemove{RemoveKeyboard: true})
+	if err != nil {
+		return err
+	}
+
+	return c.sendMessage(ctx, chatID, text, string(encoded))
+}
+
+// sendMessage — общий строитель запроса sendMessage с опциональным reply_markup.
+func (c *Client) sendMessage(ctx context.Context, chatID int, text string, replyMarkup string) (err error) {
+	defer func() { err = e.WrapIfErr("can't send message", err) }()
+
 	q := url.Values{}
 	q.Add("chat_id", strconv.Itoa(chatID))
 	q.Add("text", text)
+	if replyMarkup != "" {
+		q.Add("reply_markup", replyMarkup)
+	}
 
 	if _, err := c.doRequest(ctx, sendMessageMethod, q); err != nil {
-		return e.Wrap("can't send message", err)
+		return err
 	}
 
 	return nil

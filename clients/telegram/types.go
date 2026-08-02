@@ -64,3 +64,15 @@ type From struct {
 type Chat struct {
 	ID int `json:"id"`
 }
+
+// ReplyKeyboardMarkup — кастомная reply-клавиатура (reply_markup в sendMessage).
+type ReplyKeyboardMarkup struct {
+	Keyboard        [][]string `json:"keyboard"`
+	ResizeKeyboard  bool       `json:"resize_keyboard"`
+	OneTimeKeyboard bool       `json:"one_time_keyboard"`
+}
+
+// ReplyKeyboardRemove — скрытие reply-клавиатуры.
+type ReplyKeyboardRemove struct {
+	RemoveKeyboard bool `json:"remove_keyboard"`
+}

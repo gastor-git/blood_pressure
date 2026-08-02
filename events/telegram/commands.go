@@ -20,6 +20,8 @@ const (
 	HelpCmd     = "/help"
 	StartCmd    = "/start"
 	DownloadCmd = "/download"
+	AddCmd      = "/add"
+	CancelCmd   = "/cancel"
 )
 
 const (
@@ -54,16 +56,43 @@ var (
 	ErrSystolicNotGreater  = errors.New("систолическое давление должно быть больше диастолического")
 )
 
-// validatePressure проверяет медицинские диапазоны показаний.
-func validatePressure(sys, dia, hr int) error {
+// validateSystolic проверяет диапазон систолического давления.
+func validateSystolic(sys int) error {
 	if sys < systolicMin || sys > systolicMax {
 		return ErrSystolicOutOfRange
 	}
+
+	return nil
+}
+
+// validateDiastolic проверяет диапазон диастолического давления.
+func validateDiastolic(dia int) error {
 	if dia < diastolicMin || dia > diastolicMax {
 		return ErrDiastolicOutOfRange
 	}
+
+	return nil
+}
+
+// validateHeartRate проверяет диапазон пульса.
+func validateHeartRate(hr int) error {
 	if hr < heartRateMin || hr > heartRateMax {
 		return ErrHeartRateOutOfRange
+	}
+
+	return nil
+}
+
+// validatePressure проверяет медицинские диапазоны показаний.
+func validatePressure(sys, dia, hr int) error {
+	if err := validateSystolic(sys); err != nil {
+		return err
+	}
+	if err := validateDiastolic(dia); err != nil {
+		return err
+	}
+	if err := validateHeartRate(hr); err != nil {
+		return err
 	}
 	if sys <= dia {
 		return ErrSystolicNotGreater
@@ -85,11 +114,24 @@ func (p *Processor) doCmd(ctx context.Context, text string, chatID int, userID i
 		return e.Wrap("не удалось сохранить пользователя", err)
 	}
 
+	// Активный диалог /add: команда отменяет его, всё остальное — шаг диалога.
+	if s, ok := p.sessions[userID]; ok && s.state != stateIdle {
+		if strings.HasPrefix(text, "/") {
+			p.cancelSession(userID)
+		} else {
+			return p.handleDialog(ctx, chatID, userID, text)
+		}
+	}
+
 	if isPressure(text) {
 		return p.savePressure(ctx, chatID, text, userID, username)
 	}
 
 	switch text {
+	case AddCmd:
+		return p.startAdd(ctx, chatID, userID, username)
+	case CancelCmd:
+		return p.tg.SendMessage(ctx, chatID, msgCancel)
 	case ShowCmd:
 		return p.show(ctx, chatID, userID)
 	case DownloadCmd:
@@ -151,31 +193,52 @@ func (p *Processor) savePressure(ctx context.Context, chatID int, text string, u
 		return p.tg.SendMessage(ctx, chatID, msgInvalidPressure)
 	}
 
+	res, err := p.save(ctx, userID, username, now.Format(timeloc.DateFormat), datePart, pressures[0], pressures[1], pressures[2])
+	if err != nil {
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
+		return err
+	}
+
+	switch res {
+	case saveDuplicate:
+		return p.tg.SendMessage(ctx, chatID, msgAlreadyExists)
+	default:
+		return p.tg.SendMessage(ctx, chatID, msgSaved)
+	}
+}
+
+// saveResult — результат попытки сохранения показаний.
+type saveResult int
+
+const (
+	saveSaved saveResult = iota
+	saveDuplicate
+	saveFailed
+)
+
+// save сохраняет показания с явными датой и частью суток. Ошибка хранилища
+// возвращается как saveFailed + err; дубликат — saveDuplicate без ошибки.
+func (p *Processor) save(ctx context.Context, userID int64, username, date, dayPart, sys, dia, hr string) (saveResult, error) {
 	pressure := &storage.Pressure{
-		Date:      now.Format(timeloc.DateFormat),
-		DayPart:   datePart,
-		Systolic:  pressures[0],
-		Diastolic: pressures[1],
-		HeartRate: pressures[2],
+		Date:      date,
+		DayPart:   dayPart,
+		Systolic:  sys,
+		Diastolic: dia,
+		HeartRate: hr,
 		UserID:    userID,
 		UserName:  username,
 	}
 
 	saved, err := p.storage.Save(ctx, pressure)
 	if err != nil {
-		_ = p.tg.SendMessage(ctx, chatID, msgError)
-		return err
+		return saveFailed, err
 	}
 	if !saved {
 		// Гонки нет: уникальный индекс + ON CONFLICT DO NOTHING.
-		return p.tg.SendMessage(ctx, chatID, msgAlreadyExists)
+		return saveDuplicate, nil
 	}
 
-	if err := p.tg.SendMessage(ctx, chatID, msgSaved); err != nil {
-		return err
-	}
-
-	return nil
+	return saveSaved, nil
 }
 
 func (p *Processor) show(ctx context.Context, chatID int, userID int64) (err error) {

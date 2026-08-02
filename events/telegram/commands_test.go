@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,6 +25,13 @@ type mockClient struct {
 	sentFilename  string
 	sentData      []byte
 	sendDocErr    error
+
+	sentKeyboardText     string
+	sentKeyboards        [][]string
+	keyboardOneTime      []bool
+	removeKeyboardCalled bool
+	removeKeyboardText   string
+	removeErr            error
 }
 
 func (m *mockClient) Updates(ctx context.Context, offset, limit int) ([]tgClient.Update, error) {
@@ -36,6 +44,27 @@ func (m *mockClient) SendMessage(ctx context.Context, chatID int, text string) e
 	}
 	m.sentChatID = chatID
 	m.sentTexts = append(m.sentTexts, text)
+	return nil
+}
+
+func (m *mockClient) SendKeyboard(ctx context.Context, chatID int, text string, keyboard [][]string, oneTime bool) error {
+	if m.sendErr != nil {
+		return m.sendErr
+	}
+	m.sentChatID = chatID
+	m.sentKeyboardText = text
+	m.sentKeyboards = append(m.sentKeyboards, keyboard...)
+	m.keyboardOneTime = append(m.keyboardOneTime, oneTime)
+	return nil
+}
+
+func (m *mockClient) RemoveKeyboard(ctx context.Context, chatID int, text string) error {
+	if m.removeErr != nil {
+		return m.removeErr
+	}
+	m.removeKeyboardCalled = true
+	m.sentChatID = chatID
+	m.removeKeyboardText = text
 	return nil
 }
 
@@ -660,5 +689,402 @@ func TestClaimLegacy_CalledOncePerUser(t *testing.T) {
 
 	if st.claimLegacyCalls != 2 {
 		t.Errorf("ClaimLegacy called %d times, want 2", st.claimLegacyCalls)
+	}
+}
+
+// --- диалог /add ---
+
+// completeDialogSteps проходит полный диалог с указанной датой, частью суток
+// и значениями, вводимыми текстом.
+func completeDialogSteps(t *testing.T, p *Processor, date, dayPart string, values ...string) error {
+	t.Helper()
+
+	if err := p.doCmd(context.Background(), AddCmd, 42, 7, "user"); err != nil {
+		return err
+	}
+	if date != "" {
+		if err := p.doCmd(context.Background(), date, 42, 7, "user"); err != nil {
+			return err
+		}
+	} else if err := p.doCmd(context.Background(), msgTodayButton, 42, 7, "user"); err != nil {
+		return err
+	}
+	if err := p.doCmd(context.Background(), dayPart, 42, 7, "user"); err != nil {
+		return err
+	}
+	for _, v := range values {
+		if err := p.doCmd(context.Background(), v, 42, 7, "user"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func TestAddDialog_FullFlow(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return true, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "120", "80", "70"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+
+	if st.saveCalls != 1 {
+		t.Fatalf("Save called %d times, want 1", st.saveCalls)
+	}
+	saved := st.savedPressure
+	if saved.Systolic != "120" || saved.Diastolic != "80" || saved.HeartRate != "70" {
+		t.Errorf("saved = %s/%s/%s, want 120/80/70", saved.Systolic, saved.Diastolic, saved.HeartRate)
+	}
+	if saved.Date != timeloc.Today() {
+		t.Errorf("date = %q, want %q", saved.Date, timeloc.Today())
+	}
+	if saved.DayPart != dayPartMorning {
+		t.Errorf("dayPart = %q, want %q", saved.DayPart, dayPartMorning)
+	}
+	if saved.UserID != 7 || saved.UserName != "user" {
+		t.Errorf("saved user = %d/%q, want 7/user", saved.UserID, saved.UserName)
+	}
+	if !client.removeKeyboardCalled || client.removeKeyboardText != msgSaved {
+		t.Errorf("RemoveKeyboard = %v/%q, want true/%q", client.removeKeyboardCalled, client.removeKeyboardText, msgSaved)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed after save")
+	}
+}
+
+func TestAddDialog_TypedDate(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return true, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := completeDialogSteps(t, p, "01.01.2026", msgEveningButton, "120", "80", "70"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+
+	if st.savedPressure.Date != "2026-01-01" {
+		t.Errorf("date = %q, want 2026-01-01", st.savedPressure.Date)
+	}
+	if st.savedPressure.DayPart != dayPartEvening {
+		t.Errorf("dayPart = %q, want %q", st.savedPressure.DayPart, dayPartEvening)
+	}
+}
+
+func TestAddDialog_InvalidDate(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, "32.13.2026", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgInvalidDate {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgInvalidDate)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateDate {
+		t.Errorf("session state = %v, want stateDate", s)
+	}
+}
+
+func TestAddDialog_FutureDate(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	future := timeloc.Now().AddDate(1, 0, 0).Format(timeloc.UserDateFormat)
+	if err := p.doCmd(ctx, future, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgFutureDate {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgFutureDate)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateDate {
+		t.Errorf("session state = %v, want stateDate", s)
+	}
+}
+
+func TestAddDialog_InvalidDayPart(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, msgTodayButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, "ночь", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgInvalidDayPart {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgInvalidDayPart)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateDayPart {
+		t.Errorf("session state = %v, want stateDayPart", s)
+	}
+}
+
+func TestAddDialog_ValueOutOfRange(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+	ctx := context.Background()
+
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "500"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgInvalidSystolic {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgInvalidSystolic)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateSystolic {
+		t.Errorf("session state = %v, want stateSystolic", s)
+	}
+
+	// корректное значение продолжает диалог
+	if err := p.doCmd(ctx, "120", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateDiastolic {
+		t.Errorf("session state = %v, want stateDiastolic", s)
+	}
+}
+
+func TestAddDialog_SysNotGreater(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "100", "150"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgSystolicNotGreat {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgSystolicNotGreat)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateDiastolic {
+		t.Errorf("session state = %v, want stateDiastolic", s)
+	}
+}
+
+func TestAddDialog_InvalidNumber(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "abc"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgInvalidNumber {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgInvalidNumber)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateSystolic {
+		t.Errorf("session state = %v, want stateSystolic", s)
+	}
+}
+
+func TestAddDialog_DigitBuffer(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return true, nil
+		},
+	}
+	p := New(client, st)
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, msgTodayButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, msgMorningButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	taps := []string{"1", "2", "0", msgBackspace, "0", msgSubmit}
+	for _, tap := range taps {
+		if err := p.doCmd(ctx, tap, 42, 7, "user"); err != nil {
+			t.Fatalf("doCmd(%s) returned error: %v", tap, err)
+		}
+	}
+
+	want := []string{
+		fmt.Sprintf(msgValueBuffer, "1"),
+		fmt.Sprintf(msgValueBuffer, "12"),
+		fmt.Sprintf(msgValueBuffer, "120"),
+		fmt.Sprintf(msgValueBuffer, "12"),
+		fmt.Sprintf(msgValueBuffer, "120"),
+	}
+	if !reflect.DeepEqual(client.sentTexts, want) {
+		t.Errorf("sent %v, want %v", client.sentTexts, want)
+	}
+	if s := p.sessions[7]; s == nil || s.state != stateDiastolic {
+		t.Errorf("session state = %v, want stateDiastolic", s)
+	}
+}
+
+func TestAddDialog_Cancel(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, &mockStorage{})
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, CancelCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgCancel {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgCancel)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed on cancel")
+	}
+}
+
+func TestAddDialog_CommandCancelsSession(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+			return nil, nil
+		},
+	}
+	p := New(client, st)
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, ShowCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed on command")
+	}
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgNoSavedPressure {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgNoSavedPressure)
+	}
+}
+
+func TestAddDialog_Duplicate(t *testing.T) {
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return false, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "120", "80", "70"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+
+	if !client.removeKeyboardCalled || client.removeKeyboardText != msgAlreadyExists {
+		t.Errorf("RemoveKeyboard = %v/%q, want true/%q", client.removeKeyboardCalled, client.removeKeyboardText, msgAlreadyExists)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed on duplicate")
+	}
+}
+
+func TestAddDialog_StorageError(t *testing.T) {
+	sentinel := errors.New("boom")
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return false, sentinel
+		},
+	}
+	p := New(client, st)
+
+	err := completeDialogSteps(t, p, "", msgMorningButton, "120", "80", "70")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain does not contain sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Ошибка при сохранении показаний давления") {
+		t.Errorf("error missing wrap prefix: %v", err)
+	}
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgError {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgError)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed on storage error")
+	}
+}
+
+func TestParseUserDate(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"02.01.2026", "2026-01-02", false},
+		{"31.12.2025", "2025-12-31", false},
+		{"02.01.2026 ", "", true},
+		{"2026-01-02", "", true},
+		{"32.01.2026", "", true},
+		{"02.13.2026", "", true},
+		{"", "", true},
+		{"abc", "", true},
+	}
+
+	for _, c := range cases {
+		got, err := parseUserDate(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseUserDate(%q) = %q, want error", c.in, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("parseUserDate(%q) = %q, %v; want %q, nil", c.in, got, err, c.want)
+		}
+	}
+}
+
+func TestDayPartKey(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"Утро", dayPartMorning, true},
+		{"утро", dayPartMorning, true},
+		{"День", dayPartDay, true},
+		{"Вечер", dayPartEvening, true},
+		{"вечер", dayPartEvening, true},
+		{"ночь", "", false},
+		{"", "", false},
+	}
+
+	for _, c := range cases {
+		got, ok := dayPartKey(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("dayPartKey(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }

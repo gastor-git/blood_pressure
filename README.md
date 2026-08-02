@@ -2,20 +2,21 @@
 
 ## Краткое описание проекта
 
-Telegram-бот для записи и просмотра показаний артериального давления. Пользователь отправляет сообщение вида `120 80 70` — бот сохраняет систолическое/диастолическое давление и пульс с привязкой к дате и части суток; `/show` выводит показания за сегодня, `/download` отправляет CSV-файл со всеми показаниями за всё время. Отдельный пакет `notifier` рассылает напоминания «Пора передать показания за {часть суток}» в 11:30 / 17:30 / 23:30 (таймзона `lib/timeloc`) пользователям, ещё не передавшим показания за текущую часть суток.
+Telegram-бот для записи и просмотра показаний артериального давления. Пользователь может ввести показания быстрым способом — сообщение вида `120 80 70` — или пошагово через `/add`: выбор даты (по умолчанию — сегодня), выбор части суток (Утро/День/Вечер) и поочерёдный ввод систолического/диастолического давления и пульса с цифровой панелью и валидацией каждого значения; `/show` выводит показания за сегодня, `/download` отправляет CSV-файл со всеми показаниями за всё время. Отдельный пакет `notifier` рассылает напоминания «Пора передать показания за {часть суток}» в 11:30 / 17:30 / 23:30 (таймзона `lib/timeloc`) пользователям, ещё не передавшим показания за текущую часть суток.
 
 ## Структура репозитория
 
 | Путь | Назначение |
 |---|---|
 | `main.go` | Сборка зависимостей и старт. Путь к БД, хост API и `batchSize` — константы, **не env**. Рядом с консьюмером в отдельной горутине запускается `notifier` |
-| `clients/telegram/telegram.go` | HTTP-клиент Bot API: `Updates`, `SendMessage`, `SendDocument`, `doRequest`. Методы API — константы `getUpdatesMethod` / `sendMessageMethod` / `sendDocumentMethod`. Общие хелперы `do` (выполнение запроса, проверка HTTP-статуса, `sanitize`) и `checkOK` (поле `ok` → `APIError`); multipart-тело `SendDocument` собирает `multipartBody` |
-| `clients/telegram/types.go` | DTO ответов API (`Update`, `IncomingMessage`, `From`, `Chat`) + поля ошибок API (`ok`, `error_code`, `description`, `parameters.retry_after`), типизированная `APIError` и её билдер `toError` |
+| `clients/telegram/telegram.go` | HTTP-клиент Bot API: `Updates`, `SendMessage`, `SendKeyboard`, `RemoveKeyboard`, `SendDocument`, `doRequest`. Методы API — константы `getUpdatesMethod` / `sendMessageMethod` / `sendDocumentMethod`. Общие хелперы `do` (выполнение запроса, проверка HTTP-статуса, `sanitize`) и `checkOK` (поле `ok` → `APIError`); multipart-тело `SendDocument` собирает `multipartBody` |
+| `clients/telegram/types.go` | DTO ответов API (`Update`, `IncomingMessage`, `From`, `Chat`) + поля ошибок API (`ok`, `error_code`, `description`, `parameters.retry_after`), типизированная `APIError` и её билдер `toError`; клавиатуры `ReplyKeyboardMarkup` / `ReplyKeyboardRemove` |
 | `events/type.go` | Интерфейсы `Fetcher` / `Processor` (оба принимают `ctx context.Context`), тип `Event` и `Type` |
 | `events/telegram/telegram.go` | `*Processor` — реализует **оба** интерфейса; интерфейс `Client` объявлен на стороне потребителя ради моков |
-| `events/telegram/commands.go` | Роутинг команд, `savePressure`, `show`, `download`, `DayPart`, `isPressure`, `getPressures`. Вызов `storage.RegisterUser` в `doCmd` при каждом сообщении |
+| `events/telegram/commands.go` | Роутинг команд, `savePressure`, `save`, `show`, `download`, `DayPart`, `isPressure`, `getPressures`. Вызов `storage.RegisterUser` в `doCmd` при каждом сообщении |
+| `events/telegram/dialog.go` | State-machine пошагового ввода `/add`: `session` по `user_id`, шаги дата → часть суток → систола → диастола → пульс; reply-клавиатуры (`dateKeyboard`, `dayPartKeyboard`, `digitKeyboard`), буфер цифр, `parseUserDate`, `dayPartKey` |
 | `events/telegram/csv.go` | Генерация CSV-выгрузки `/download`: `formatCSV` (BOM + CRLF, разделитель `;`, фиксированный порядок утро→день→вечер, значения показаний как `систолическое/диастолическое/пульс`, пустые ячейки) и `csvFilename` |
-| `events/telegram/messages.go` | **Все** тексты для пользователя, константы с префиксом `msg` (включая шапку CSV `msgCSVHeader`). `MsgReminder` — единственная экспортированная, нужна пакету `notifier` |
+| `events/telegram/messages.go` | **Все** тексты для пользователя, константы с префиксом `msg` (включая шапку CSV `msgCSVHeader`, промпты и кнопки диалога `/add`). `MsgReminder` — единственная экспортированная, нужна пакету `notifier` |
 | `consumer/consumer.go` | Интерфейс `Consumer` с сигнатурой `Start(ctx context.Context) error` |
 | `consumer/event-consumer/` | Пакет `event_consumer`: цикл fetch → process, завершается по отмене `ctx`; `recover` вокруг обработки каждого события |
 | `notifier/notifier.go` | Рассылка напоминаний в своей горутине: `Notifier`, цикл `Start(ctx)` (таймер + `select` на `ctx.Done()`), `nextTrigger` ({11:30, 17:30, 23:30}, таймзона `lib/timeloc`), `notify` (получатели — без записи за часть суток). Интерфейсы `Storage` / `Sender` — на стороне потребителя |
@@ -23,7 +24,7 @@ Telegram-бот для записи и просмотра показаний а�
 | `storage/sqlite/sqlite.go` | Реализация на SQLite. `New` настраивает пул (`SetMaxOpenConns(1)`) и DSN (`_busy_timeout`, WAL); есть `Close()`. `Save` — `INSERT ... ON CONFLICT DO NOTHING`, признак вставки из `RowsAffected`. `Show()`/`GetAll()` возвращают `[]storage.Pressure` (форматирование — в `events/telegram`). `RegisterUser` — upsert в таблицу `users`. `UsersWithoutPressure` — подзапрос `NOT EXISTS` по `blood_pressure`. `Init` вызывает механизм миграций |
 | `storage/sqlite/migrations.go` | Механизм миграций: срез `migrations []func(ctx, *sql.Tx) error`, версия схемы — `PRAGMA user_version`; каждая миграция в своей транзакции. `migration3` создаёт таблицу `users` |
 | `lib/e/e.go` | `Wrap` (nil-safe) / `WrapIfErr` — обёртки над `fmt.Errorf("%w")` |
-| `lib/timeloc/timeloc.go` | Единая таймзона учёта (`Asia/Yekaterinburg`) и формат даты; `time.LoadLocation` — один раз при инициализации пакета |
+| `lib/timeloc/timeloc.go` | Единая таймзона учёта (`Asia/Yekaterinburg`) и форматы даты (`DateFormat`, `CSVDateFormat`, `UserDateFormat`); `time.LoadLocation` — один раз при инициализации пакета |
 | `events/telegram/commands_test.go`, `clients/telegram/telegram_test.go`, `storage/sqlite/sqlite_test.go`, `notifier/notifier_test.go` | Единственные тестовые файлы |
 | `Makefile` | Таргеты `dc_*` для docker compose и `test` |
 | `Dockerfile`, `docker-compose.yml` | Сборка и запуск контейнера |
@@ -63,6 +64,7 @@ make dc_down           # ВНИМАНИЕ: сносит volume (-v) и обра�
 
 - **Интерфейсы объявляются на стороне потребителя.** `events/telegram.Client` существует ради моков; `*clients/telegram.Client` удовлетворяет ему неявно. **Не заменять поле `tg` на конкретный тип** — это сломает тесты. То же для `notifier.Storage` / `notifier.Sender`.
 - `*Processor` реализует и `events.Fetcher`, и `events.Processor`, поэтому передаётся дважды: `event_consumer.New(eventsProcessor, eventsProcessor, batchSize)`.
+- **Диалог `/add`** — state-machine в памяти: `Processor.sessions map[int64]*session` (как `claimed`, без мьютекса: консьюмер однопоточный). Активное состояние перехватывает все не-командные сообщения; любая команда сбрасывает диалог и выполняется как обычно, `/cancel` — отмена с сообщением. Клавиатуры и их кнопки — только в `messages.go`/`dialog.go`, тексты — только в `messages.go`.
 - `events/telegram.DayPart` и `MsgReminder` — экспортированы, потому что их использует пакет `notifier` (метка части суток и шаблон текста напоминания). `notifier.nextTrigger` строит время через `time.Date(..., timeloc.Location())`; `notify` опрашивает `timeloc.Today()`.
 - **Ошибки:** в `events/`, `clients/` и `notifier/` — `lib/e` через `defer` в начале функции (`defer func() { err = e.WrapIfErr("...", err) }()`), для чего нужны именованные возвращаемые значения. В `storage/sqlite` — напрямую `fmt.Errorf("...: %w", err)`. Sentinel-ошибки объявляются в пакете-владельце и сравниваются через `errors.Is`.
 - **Именование:** пакеты `events/telegram` и `clients/telegram` оба называются `telegram`, поэтому в `main.go` и тестах нужен алиас `tgClient`. Пакет в `consumer/event-consumer` называется `event_consumer` — с подчёркиванием.

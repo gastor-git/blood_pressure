@@ -14,6 +14,8 @@ type Client interface {
 	Updates(ctx context.Context, offset, limit int) ([]telegram.Update, error)
 	SendMessage(ctx context.Context, chatID int, text string) error
 	SendDocument(ctx context.Context, chatID int, filename string, data []byte) error
+	SendKeyboard(ctx context.Context, chatID int, text string, keyboard [][]string, oneTime bool) error
+	RemoveKeyboard(ctx context.Context, chatID int, text string) error
 }
 
 type Processor struct {
@@ -24,6 +26,9 @@ type Processor struct {
 	// уже выполнен за время жизни процесса. Консьюмер однопоточный, поэтому
 	// мьютекс не нужен.
 	claimed map[int64]bool
+	// sessions — активные диалоги ввода показаний по user_id. Как и claimed,
+	// живут в памяти и не требуют мьютекса: консьюмер однопоточный.
+	sessions map[int64]*session
 }
 
 type Meta struct {
@@ -39,9 +44,10 @@ var (
 
 func New(client Client, storage storage.Storage) *Processor {
 	return &Processor{
-		tg:      client,
-		storage: storage,
-		claimed: make(map[int64]bool),
+		tg:       client,
+		storage:  storage,
+		claimed:  make(map[int64]bool),
+		sessions: make(map[int64]*session),
 	}
 }
 
