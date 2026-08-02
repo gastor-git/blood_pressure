@@ -74,7 +74,7 @@ make cli_delete ARGS="-user-name bob -from 01.01.2026 -to 31.01.2026 -yes"
 
 - Зависимости ставятся штатным `go mod download`; vendor-каталога нет.
 - **`CGO_ENABLED=0` ломает и сборку, и тесты** — из-за `go-sqlite3`. В Dockerfile статическая линковка сделана через `-tags netgo -ldflags '-extldflags "-static"'`, а не отключением cgo.
-- Линтер `golangci-lint` (`make lint`, конфиг — `.golangci.yml`) и CI в GitHub Actions (`.github/workflows/ci.yml`) добавлены; CI прогоняет `go build` / `go vet` / `gofmt` / `make test` и `golangci-lint` при каждом `push` и `pull_request`. Локальная установка линтера: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12` (в CI версия берётся из `ci.yml`).
+- Линтер `golangci-lint` (`make lint`, конфиг — `.golangci.yml`) и CI в GitHub Actions (`.github/workflows/ci.yml`) добавлены; CI прогоняет `go build` / `go vet` / `gofmt` / `make test` и `golangci-lint` при каждом `push` и `pull_request`. Локальная установка линтера: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12` (в CI версия берётся из `ci.yml`). Настройка CI на стороне GitHub описана в [`CI.md`](CI.md).
 - Проект на `go 1.26` (`go.mod`), в Dockerfile — `golang:1.26`; `go-sqlite3` — `v1.14.49`.
 
 ## Стиль кода и конвенции
