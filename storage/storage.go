@@ -6,6 +6,12 @@ type Storage interface {
 	// Save сохраняет показания. Возвращает false, если запись за эту часть
 	// суток у пользователя уже есть (ON CONFLICT DO NOTHING).
 	Save(ctx context.Context, p *Pressure) (bool, error)
+	// Get возвращает запись по ключу (user_id, date, day_part).
+	// (nil, nil) — записи нет.
+	Get(ctx context.Context, userID int64, date, dayPart string) (*Pressure, error)
+	// Update перезаписывает значения существующей записи по ключу
+	// (user_id, date, day_part).
+	Update(ctx context.Context, p *Pressure) error
 	Show(ctx context.Context, userID int64) ([]Pressure, error)
 	// GetAll возвращает все показания пользователя за всё время.
 	GetAll(ctx context.Context, userID int64) ([]Pressure, error)

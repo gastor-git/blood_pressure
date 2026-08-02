@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -186,6 +188,109 @@ func TestShow_Empty(t *testing.T) {
 	}
 	if len(res) != 0 {
 		t.Errorf("Show() = %+v, want empty slice", res)
+	}
+}
+
+func TestGet_Found(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	p := &storage.Pressure{Date: date, DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1, UserName: "user1"}
+	if _, err := s.Save(ctx, p); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	got, err := s.Get(ctx, 1, date, "утро")
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get() = nil, want record")
+	}
+	if got.Date != date || got.DayPart != "утро" || got.Systolic != "120" || got.Diastolic != "80" || got.HeartRate != "70" {
+		t.Errorf("Get() = %+v, want date=%s утро 120/80/70", got, date)
+	}
+	if got.UserID != 1 || got.UserName != "user1" {
+		t.Errorf("Get() user = %d/%q, want 1/user1", got.UserID, got.UserName)
+	}
+}
+
+func TestGet_NotFound(t *testing.T) {
+	s := newTestStorage(t)
+
+	got, err := s.Get(context.Background(), 999, today(t), "утро")
+	if err != nil {
+		t.Fatalf("Get() error = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("Get() = %+v, want nil", got)
+	}
+}
+
+func TestGet_OtherUser(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	p := &storage.Pressure{Date: date, DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1, UserName: "user1"}
+	if _, err := s.Save(ctx, p); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// тот же день и часть суток, но другой пользователь
+	got, err := s.Get(ctx, 2, date, "утро")
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Get(2) = %+v, want nil (record belongs to user 1)", got)
+	}
+}
+
+func TestUpdate_Overwrite(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+	date := today(t)
+
+	orig := &storage.Pressure{Date: date, DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1, UserName: "user1"}
+	if _, err := s.Save(ctx, orig); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	upd := &storage.Pressure{Date: date, DayPart: "утро", Systolic: "130", Diastolic: "85", HeartRate: "75", UserID: 1, UserName: "user1_renamed"}
+	if err := s.Update(ctx, upd); err != nil {
+		t.Fatalf("Update() failed: %v", err)
+	}
+
+	// ключ не изменился: запись по-прежнему одна, значения перезаписаны
+	res, err := s.GetAll(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("GetAll() returned %d rows, want 1", len(res))
+	}
+	got := res[0]
+	if got.Systolic != "130" || got.Diastolic != "85" || got.HeartRate != "75" {
+		t.Errorf("GetAll() = %+v, want updated 130/85/75", got)
+	}
+	if got.UserName != "user1_renamed" {
+		t.Errorf("UserName = %q, want user1_renamed", got.UserName)
+	}
+}
+
+func TestUpdate_NotFound(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	upd := &storage.Pressure{Date: today(t), DayPart: "утро", Systolic: "130", Diastolic: "85", HeartRate: "75", UserID: 999}
+	err := s.Update(ctx, upd)
+	if err == nil {
+		t.Fatal("Update() = nil, want error for missing record")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Update() error = %v, want sql.ErrNoRows", err)
 	}
 }
 

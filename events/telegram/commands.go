@@ -187,10 +187,57 @@ func (p *Processor) savePressure(ctx context.Context, chatID int, text string, u
 
 	switch res {
 	case saveDuplicate:
-		return p.tg.SendMessage(ctx, chatID, msgAlreadyExists)
+		return p.confirmOverwrite(ctx, chatID, userID, now.Format(timeloc.DateFormat), datePart, username, sys, dia, hr)
 	default:
 		return p.tg.SendMessage(ctx, chatID, msgSaved)
 	}
+}
+
+// confirmOverwrite начинает подтверждение перезаписи существующей записи:
+// читает старые показания и показывает промпт с клавиатурой выбора. Для
+// диалога /add переиспользует активную сессию, для быстрого ввода создаёт
+// новую и переводит её в состояние stateConfirmOverwrite.
+func (p *Processor) confirmOverwrite(ctx context.Context, chatID int, userID int64, date, dayPart, username, sys, dia, hr string) (err error) {
+	defer func() {
+		err = e.WrapIfErr("Ошибка при сохранении показаний давления", err)
+	}()
+
+	existing, err := p.storage.Get(ctx, userID, date, dayPart)
+	if err != nil {
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
+
+		return err
+	}
+
+	if existing == nil {
+		// Гонок нет (консьюмер однопоточный): запись могла исчезнуть только
+		// при ручном вмешательстве в БД. Сохраняем напрямую.
+		if _, err := p.save(ctx, userID, username, date, dayPart, sys, dia, hr); err != nil {
+			_ = p.tg.SendMessage(ctx, chatID, msgError)
+
+			return err
+		}
+
+		return p.tg.SendMessage(ctx, chatID, msgSaved)
+	}
+
+	s := p.sessions[userID]
+	if s == nil {
+		s = &session{userName: username}
+		p.sessions[userID] = s
+	}
+
+	s.state = stateConfirmOverwrite
+	s.date = date
+	s.dayPart = dayPart
+	s.pendingSys = sys
+	s.pendingDia = dia
+	s.pendingHr = hr
+
+	return p.tg.SendKeyboard(ctx, chatID, fmt.Sprintf(msgDuplicatePrompt,
+		formatCSVDate(date), dayPart,
+		existing.Systolic, existing.Diastolic, existing.HeartRate,
+		sys, dia, hr), overwriteKeyboard, true)
 }
 
 // saveResult — результат попытки сохранения показаний.

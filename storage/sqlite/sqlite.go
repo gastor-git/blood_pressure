@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -60,6 +61,45 @@ func (s *Storage) Save(ctx context.Context, p *storage.Pressure) (bool, error) {
 	}
 
 	return affected > 0, nil
+}
+
+// Get возвращает запись показаний по ключу (user_id, date, day_part).
+// (nil, nil) — записи нет.
+func (s *Storage) Get(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error) {
+	q := `SELECT date, day_part, systolic, diastolic, heart_rate, user_id, user_name FROM blood_pressure WHERE user_id = ? AND date = ? AND day_part = ?`
+
+	var p storage.Pressure
+	err := s.db.QueryRowContext(ctx, q, userID, date, dayPart).
+		Scan(&p.Date, &p.DayPart, &p.Systolic, &p.Diastolic, &p.HeartRate, &p.UserID, &p.UserName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("can't get pressure: %w", err)
+	}
+
+	return &p, nil
+}
+
+// Update перезаписывает показания существующей записи по ключу
+// (user_id, date, day_part). Ошибка (sql.ErrNoRows) — записи нет.
+func (s *Storage) Update(ctx context.Context, p *storage.Pressure) error {
+	q := `UPDATE blood_pressure SET systolic = ?, diastolic = ?, heart_rate = ?, user_name = ? WHERE user_id = ? AND date = ? AND day_part = ?`
+
+	res, err := s.db.ExecContext(ctx, q, p.Systolic, p.Diastolic, p.HeartRate, p.UserName, p.UserID, p.Date, p.DayPart)
+	if err != nil {
+		return fmt.Errorf("can't update pressures: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("can't update pressures: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("can't update pressures: %w", sql.ErrNoRows)
+	}
+
+	return nil
 }
 
 // Show возвращает сегодняшние показания пользователя по user_id.

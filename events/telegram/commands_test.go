@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -80,12 +81,16 @@ func (m *mockClient) SendDocument(ctx context.Context, chatID int, filename stri
 
 type mockStorage struct {
 	saveFunc        func(ctx context.Context, p *storage.Pressure) (bool, error)
+	getFunc         func(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error)
+	updateFunc      func(ctx context.Context, p *storage.Pressure) error
 	showFunc        func(ctx context.Context, userID int64) ([]storage.Pressure, error)
 	getAllFunc      func(ctx context.Context, userID int64) ([]storage.Pressure, error)
 	claimLegacyFunc func(ctx context.Context, userID int64, userName string) error
 	registerUser    func(ctx context.Context, userID int64, chatID int64, userName string) error
 
 	saveCalls          int
+	getCalls           int
+	updateCalls        int
 	getAllCalls        int
 	claimLegacyCalls   int
 	registerUserCalls  int
@@ -93,6 +98,7 @@ type mockStorage struct {
 	registeredChatID   int64
 	registeredUserName string
 	savedPressure      *storage.Pressure
+	updatedPressure    *storage.Pressure
 }
 
 func (m *mockStorage) Save(ctx context.Context, p *storage.Pressure) (bool, error) {
@@ -102,6 +108,23 @@ func (m *mockStorage) Save(ctx context.Context, p *storage.Pressure) (bool, erro
 		return m.saveFunc(ctx, p)
 	}
 	return true, nil
+}
+
+func (m *mockStorage) Get(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error) {
+	m.getCalls++
+	if m.getFunc != nil {
+		return m.getFunc(ctx, userID, date, dayPart)
+	}
+	return nil, nil
+}
+
+func (m *mockStorage) Update(ctx context.Context, p *storage.Pressure) error {
+	m.updateCalls++
+	m.updatedPressure = p
+	if m.updateFunc != nil {
+		return m.updateFunc(ctx, p)
+	}
+	return nil
 }
 
 func (m *mockStorage) Show(ctx context.Context, userID int64) ([]storage.Pressure, error) {
@@ -387,6 +410,9 @@ func TestSavePressure_Duplicate(t *testing.T) {
 		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
 			return false, nil
 		},
+		getFunc: func(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error) {
+			return &storage.Pressure{Date: date, DayPart: dayPart, Systolic: "100", Diastolic: "70", HeartRate: "60"}, nil
+		},
 	}
 	p := New(client, st)
 
@@ -397,8 +423,26 @@ func TestSavePressure_Duplicate(t *testing.T) {
 	if st.saveCalls != 1 {
 		t.Errorf("Save called %d times, want 1", st.saveCalls)
 	}
-	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgAlreadyExists {
-		t.Errorf("sent %v, want [%q]", client.sentTexts, msgAlreadyExists)
+	if st.getCalls != 1 {
+		t.Errorf("Get called %d times, want 1", st.getCalls)
+	}
+
+	today := timeloc.Today()
+	dayPart := DayPart(timeloc.Now())
+	want := fmt.Sprintf(msgDuplicatePrompt, formatCSVDate(today), dayPart, "100", "70", "60", "120", "80", "70")
+	if client.sentKeyboardText != want {
+		t.Errorf("keyboard text = %q, want %q", client.sentKeyboardText, want)
+	}
+	if !reflect.DeepEqual(client.sentKeyboards, overwriteKeyboard) {
+		t.Errorf("keyboard = %v, want %v", client.sentKeyboards, overwriteKeyboard)
+	}
+
+	s := p.sessions[7]
+	if s == nil || s.state != stateConfirmOverwrite {
+		t.Fatalf("session state = %v, want stateConfirmOverwrite", s)
+	}
+	if s.pendingSys != "120" || s.pendingDia != "80" || s.pendingHr != "70" {
+		t.Errorf("pending = %s/%s/%s, want 120/80/70", s.pendingSys, s.pendingDia, s.pendingHr)
 	}
 }
 
@@ -962,6 +1006,9 @@ func TestAddDialog_Duplicate(t *testing.T) {
 		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
 			return false, nil
 		},
+		getFunc: func(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error) {
+			return &storage.Pressure{Date: date, DayPart: dayPart, Systolic: "100", Diastolic: "70", HeartRate: "60"}, nil
+		},
 	}
 	p := New(client, st)
 
@@ -969,11 +1016,18 @@ func TestAddDialog_Duplicate(t *testing.T) {
 		t.Fatalf("dialog failed: %v", err)
 	}
 
-	if !client.removeKeyboardCalled || client.removeKeyboardText != msgAlreadyExists {
-		t.Errorf("RemoveKeyboard = %v/%q, want true/%q", client.removeKeyboardCalled, client.removeKeyboardText, msgAlreadyExists)
+	if client.removeKeyboardCalled {
+		t.Error("RemoveKeyboard called, want not (duplicate asks for confirmation)")
 	}
-	if _, ok := p.sessions[7]; ok {
-		t.Error("session not removed on duplicate")
+
+	want := fmt.Sprintf(msgDuplicatePrompt, formatCSVDate(timeloc.Today()), dayPartMorning, "100", "70", "60", "120", "80", "70")
+	if client.sentKeyboardText != want {
+		t.Errorf("keyboard text = %q, want %q", client.sentKeyboardText, want)
+	}
+
+	// сессия не отменяется, а переходит к подтверждению перезаписи
+	if s := p.sessions[7]; s == nil || s.state != stateConfirmOverwrite {
+		t.Errorf("session state = %v, want stateConfirmOverwrite", s)
 	}
 }
 
@@ -1002,6 +1056,229 @@ func TestAddDialog_StorageError(t *testing.T) {
 	}
 	if _, ok := p.sessions[7]; ok {
 		t.Error("session not removed on storage error")
+	}
+}
+
+// --- подтверждение перезаписи дубликата ---
+
+// duplicateStorage возвращает mockStorage, который при сохранении сообщает о
+// дубликате, а Get возвращает существующую запись.
+func duplicateStorage() *mockStorage {
+	return &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return false, nil
+		},
+		getFunc: func(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error) {
+			return &storage.Pressure{Date: date, DayPart: dayPart, Systolic: "100", Diastolic: "70", HeartRate: "60"}, nil
+		},
+	}
+}
+
+func TestOverwrite_Confirm_Quick(t *testing.T) {
+	client := &mockClient{}
+	st := duplicateStorage()
+	p := New(client, st)
+	ctx := context.Background()
+
+	// дата и часть суток фиксируются один раз: быстрый ввод берёт их из now
+	dayPart := DayPart(timeloc.Now())
+
+	if err := p.doCmd(ctx, "120 80 70", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, msgOverwriteButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if st.updateCalls != 1 {
+		t.Fatalf("Update called %d times, want 1", st.updateCalls)
+	}
+	updated := st.updatedPressure
+	if updated.Systolic != "120" || updated.Diastolic != "80" || updated.HeartRate != "70" {
+		t.Errorf("updated = %s/%s/%s, want 120/80/70", updated.Systolic, updated.Diastolic, updated.HeartRate)
+	}
+	if updated.Date != timeloc.Today() {
+		t.Errorf("updated date = %q, want %q", updated.Date, timeloc.Today())
+	}
+	if updated.DayPart != dayPart {
+		t.Errorf("updated dayPart = %q, want %q", updated.DayPart, dayPart)
+	}
+	if updated.UserID != 7 || updated.UserName != "user" {
+		t.Errorf("updated user = %d/%q, want 7/user", updated.UserID, updated.UserName)
+	}
+	if !client.removeKeyboardCalled || client.removeKeyboardText != msgOverwritten {
+		t.Errorf("RemoveKeyboard = %v/%q, want true/%q", client.removeKeyboardCalled, client.removeKeyboardText, msgOverwritten)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed after overwrite")
+	}
+}
+
+func TestOverwrite_Confirm_Dialog(t *testing.T) {
+	client := &mockClient{}
+	st := duplicateStorage()
+	p := New(client, st)
+	ctx := context.Background()
+
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "120 80 70"); err != nil {
+		t.Fatalf("dialog failed: %v", err)
+	}
+	if err := p.doCmd(ctx, msgOverwriteButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if st.updateCalls != 1 {
+		t.Fatalf("Update called %d times, want 1", st.updateCalls)
+	}
+	updated := st.updatedPressure
+	if updated.Systolic != "120" || updated.Diastolic != "80" || updated.HeartRate != "70" {
+		t.Errorf("updated = %s/%s/%s, want 120/80/70", updated.Systolic, updated.Diastolic, updated.HeartRate)
+	}
+	if updated.Date != timeloc.Today() || updated.DayPart != dayPartMorning {
+		t.Errorf("updated key = %q/%q, want %q/%q", updated.Date, updated.DayPart, timeloc.Today(), dayPartMorning)
+	}
+	if updated.UserID != 7 || updated.UserName != "user" {
+		t.Errorf("updated user = %d/%q, want 7/user", updated.UserID, updated.UserName)
+	}
+	if !client.removeKeyboardCalled || client.removeKeyboardText != msgOverwritten {
+		t.Errorf("RemoveKeyboard = %v/%q, want true/%q", client.removeKeyboardCalled, client.removeKeyboardText, msgOverwritten)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed after overwrite")
+	}
+}
+
+func TestOverwrite_KeepExisting(t *testing.T) {
+	client := &mockClient{}
+	st := duplicateStorage()
+	p := New(client, st)
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, "120 80 70", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, msgKeepButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if st.updateCalls != 0 {
+		t.Errorf("Update called %d times, want 0", st.updateCalls)
+	}
+	if !client.removeKeyboardCalled || client.removeKeyboardText != msgKeepExisting {
+		t.Errorf("RemoveKeyboard = %v/%q, want true/%q", client.removeKeyboardCalled, client.removeKeyboardText, msgKeepExisting)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed after keep existing")
+	}
+}
+
+func TestOverwrite_InvalidChoice(t *testing.T) {
+	client := &mockClient{}
+	p := New(client, duplicateStorage())
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, "120 80 70", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if err := p.doCmd(ctx, "да", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if client.sentKeyboardText != msgInvalidOverwriteChoice {
+		t.Errorf("keyboard text = %q, want %q", client.sentKeyboardText, msgInvalidOverwriteChoice)
+	}
+	if st := p.sessions[7]; st == nil || st.state != stateConfirmOverwrite {
+		t.Errorf("session state = %v, want stateConfirmOverwrite", st)
+	}
+
+	// корректный выбор завершает подтверждение
+	if err := p.doCmd(ctx, msgKeepButton, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed after valid choice")
+	}
+}
+
+func TestOverwrite_GetError(t *testing.T) {
+	sentinel := errors.New("boom")
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return false, nil
+		},
+		getFunc: func(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error) {
+			return nil, sentinel
+		},
+	}
+	p := New(client, st)
+
+	err := p.doCmd(context.Background(), "120 80 70", 42, 7, "user")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain does not contain sentinel: %v", err)
+	}
+	if n := len(client.sentTexts); n != 1 || client.sentTexts[n-1] != msgError {
+		t.Errorf("sent %v, want last [%q]", client.sentTexts, msgError)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session created on Get error")
+	}
+}
+
+func TestOverwrite_UpdateError(t *testing.T) {
+	sentinel := errors.New("boom")
+	client := &mockClient{}
+	st := duplicateStorage()
+	st.updateFunc = func(ctx context.Context, p *storage.Pressure) error {
+		return sentinel
+	}
+	p := New(client, st)
+	ctx := context.Background()
+
+	if err := p.doCmd(ctx, "120 80 70", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+	err := p.doCmd(ctx, msgOverwriteButton, 42, 7, "user")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error chain does not contain sentinel: %v", err)
+	}
+	if n := len(client.sentTexts); n != 1 || client.sentTexts[n-1] != msgError {
+		t.Errorf("sent %v, want last [%q]", client.sentTexts, msgError)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed on Update error")
+	}
+}
+
+func TestOverwrite_RecordGone(t *testing.T) {
+	// Save сообщил о дубликате, но Get записи не нашёл (ручное вмешательство
+	// в БД) — значения сохраняются напрямую.
+	client := &mockClient{}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return false, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := p.doCmd(context.Background(), "120 80 70", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	if st.saveCalls != 2 {
+		t.Errorf("Save called %d times, want 2", st.saveCalls)
+	}
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgSaved {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgSaved)
+	}
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session created when record is gone")
 	}
 }
 

@@ -3,11 +3,13 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"blood-pressure-bot/lib/e"
 	"blood-pressure-bot/lib/timeloc"
+	"blood-pressure-bot/storage"
 )
 
 // dialogState — шаг пошагового ввода показаний (/add).
@@ -18,6 +20,7 @@ const (
 	stateDate
 	stateDayPart
 	statePressure
+	stateConfirmOverwrite
 )
 
 // session — состояние активного диалога ввода показаний пользователя.
@@ -26,12 +29,17 @@ type session struct {
 	date     string // формат хранения 2006-01-02
 	dayPart  string
 	userName string
+	// pending* — отложенные значения показаний при подтверждении перезаписи.
+	pendingSys string
+	pendingDia string
+	pendingHr  string
 }
 
-// Клавиатуры диалога: выбора даты и части суток.
+// Клавиатуры диалога: выбора даты, части суток и подтверждения перезаписи.
 var (
-	dateKeyboard    = [][]string{{msgTodayButton}}
-	dayPartKeyboard = [][]string{{msgMorningButton, msgDayButton, msgEveningButton}}
+	dateKeyboard      = [][]string{{msgTodayButton}}
+	dayPartKeyboard   = [][]string{{msgMorningButton, msgDayButton, msgEveningButton}}
+	overwriteKeyboard = [][]string{{msgOverwriteButton}, {msgKeepButton}}
 )
 
 // startAdd начинает диалог ввода показаний: шаг выбора даты.
@@ -52,6 +60,8 @@ func (p *Processor) handleDialog(ctx context.Context, chatID int, userID int64, 
 		return p.handleDayPart(ctx, chatID, s, text)
 	case statePressure:
 		return p.handlePressure(ctx, chatID, userID, s, text)
+	case stateConfirmOverwrite:
+		return p.handleOverwrite(ctx, chatID, userID, s, text)
 	default:
 		return nil
 	}
@@ -147,18 +157,87 @@ func (p *Processor) completeDialog(ctx context.Context, chatID int, userID int64
 	}()
 
 	res, err := p.save(ctx, userID, s.userName, s.date, s.dayPart, sys, dia, hr)
-	p.cancelSession(userID)
 	if err != nil {
+		p.cancelSession(userID)
 		_ = p.tg.SendMessage(ctx, chatID, msgError)
 
 		return err
 	}
 
 	if res == saveDuplicate {
-		return p.tg.RemoveKeyboard(ctx, chatID, msgAlreadyExists)
+		// Сессию не отменяем: переходим к подтверждению перезаписи.
+		return p.confirmOverwrite(ctx, chatID, userID, s.date, s.dayPart, s.userName, sys, dia, hr)
 	}
 
+	p.cancelSession(userID)
+
 	return p.tg.RemoveKeyboard(ctx, chatID, msgSaved)
+}
+
+// handleOverwrite обрабатывает ответ на вопрос о перезаписи дубликата.
+func (p *Processor) handleOverwrite(ctx context.Context, chatID int, userID int64, s *session, text string) error {
+	switch strings.TrimSpace(text) {
+	case msgOverwriteButton:
+		return p.doOverwrite(ctx, chatID, userID, s)
+	case msgKeepButton:
+		p.cancelSession(userID)
+
+		return p.tg.RemoveKeyboard(ctx, chatID, msgKeepExisting)
+	default:
+		return p.tg.SendKeyboard(ctx, chatID, msgInvalidOverwriteChoice, overwriteKeyboard, true)
+	}
+}
+
+// doOverwrite перезаписывает существующую запись отложенными значениями.
+func (p *Processor) doOverwrite(ctx context.Context, chatID int, userID int64, s *session) (err error) {
+	defer func() {
+		err = e.WrapIfErr("Ошибка при сохранении показаний давления", err)
+	}()
+
+	// Дефензивная валидация отложенных значений: в штатном флоу они уже
+	// прошли validatePressure при вводе.
+	sys, err := strconv.Atoi(s.pendingSys)
+	if err != nil {
+		p.cancelSession(userID)
+
+		return p.tg.SendMessage(ctx, chatID, msgInvalidPressure)
+	}
+	dia, err := strconv.Atoi(s.pendingDia)
+	if err != nil {
+		p.cancelSession(userID)
+
+		return p.tg.SendMessage(ctx, chatID, msgInvalidPressure)
+	}
+	hr, err := strconv.Atoi(s.pendingHr)
+	if err != nil {
+		p.cancelSession(userID)
+
+		return p.tg.SendMessage(ctx, chatID, msgInvalidPressure)
+	}
+	if err := validatePressure(sys, dia, hr); err != nil {
+		p.cancelSession(userID)
+
+		return p.tg.SendMessage(ctx, chatID, msgInvalidPressure)
+	}
+
+	if err := p.storage.Update(ctx, &storage.Pressure{
+		Date:      s.date,
+		DayPart:   s.dayPart,
+		Systolic:  s.pendingSys,
+		Diastolic: s.pendingDia,
+		HeartRate: s.pendingHr,
+		UserID:    userID,
+		UserName:  s.userName,
+	}); err != nil {
+		p.cancelSession(userID)
+		_ = p.tg.SendMessage(ctx, chatID, msgError)
+
+		return err
+	}
+
+	p.cancelSession(userID)
+
+	return p.tg.RemoveKeyboard(ctx, chatID, msgOverwritten)
 }
 
 // cancelSession завершает активный диалог пользователя.
