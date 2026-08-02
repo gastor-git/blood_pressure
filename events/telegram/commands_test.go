@@ -3,7 +3,6 @@ package telegram
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -444,7 +443,7 @@ func TestShow_Empty(t *testing.T) {
 
 func TestShow_WithData(t *testing.T) {
 	client := &mockClient{}
-	const data = "Дата: 2026-01-02, часть суток: утро, показания: 120/80/70\n\n"
+	const data = "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n"
 	st := &mockStorage{
 		showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
 			return []storage.Pressure{
@@ -480,7 +479,7 @@ func TestFormatPressures(t *testing.T) {
 			in: []storage.Pressure{
 				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
 			},
-			want: "Дата: 2026-01-02, часть суток: утро, показания: 120/80/70\n\n",
+			want: "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n",
 		},
 		{
 			name: "несколько записей",
@@ -488,8 +487,8 @@ func TestFormatPressures(t *testing.T) {
 				{Date: "2026-01-02", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70"},
 				{Date: "2026-01-02", DayPart: "вечер", Systolic: "130", Diastolic: "85", HeartRate: "75"},
 			},
-			want: "Дата: 2026-01-02, часть суток: утро, показания: 120/80/70\n\n" +
-				"Дата: 2026-01-02, часть суток: вечер, показания: 130/85/75\n\n",
+			want: "Дата: 02.01.2026, часть суток: утро, показания: 120/80/70\n\n" +
+				"Дата: 02.01.2026, часть суток: вечер, показания: 130/85/75\n\n",
 		},
 	}
 
@@ -695,8 +694,8 @@ func TestClaimLegacy_CalledOncePerUser(t *testing.T) {
 // --- диалог /add ---
 
 // completeDialogSteps проходит полный диалог с указанной датой, частью суток
-// и значениями, вводимыми текстом.
-func completeDialogSteps(t *testing.T, p *Processor, date, dayPart string, values ...string) error {
+// и показаниями, вводимыми одним сообщением вида «120 80 70».
+func completeDialogSteps(t *testing.T, p *Processor, date, dayPart, pressure string) error {
 	t.Helper()
 
 	if err := p.doCmd(context.Background(), AddCmd, 42, 7, "user"); err != nil {
@@ -712,10 +711,8 @@ func completeDialogSteps(t *testing.T, p *Processor, date, dayPart string, value
 	if err := p.doCmd(context.Background(), dayPart, 42, 7, "user"); err != nil {
 		return err
 	}
-	for _, v := range values {
-		if err := p.doCmd(context.Background(), v, 42, 7, "user"); err != nil {
-			return err
-		}
+	if err := p.doCmd(context.Background(), pressure, 42, 7, "user"); err != nil {
+		return err
 	}
 
 	return nil
@@ -730,7 +727,7 @@ func TestAddDialog_FullFlow(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := completeDialogSteps(t, p, "", msgMorningButton, "120", "80", "70"); err != nil {
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "120 80 70"); err != nil {
 		t.Fatalf("dialog failed: %v", err)
 	}
 
@@ -767,7 +764,7 @@ func TestAddDialog_TypedDate(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := completeDialogSteps(t, p, "01.01.2026", msgEveningButton, "120", "80", "70"); err != nil {
+	if err := completeDialogSteps(t, p, "01.01.2026", msgEveningButton, "120 80 70"); err != nil {
 		t.Fatalf("dialog failed: %v", err)
 	}
 
@@ -848,23 +845,23 @@ func TestAddDialog_ValueOutOfRange(t *testing.T) {
 	p := New(client, &mockStorage{})
 	ctx := context.Background()
 
-	if err := completeDialogSteps(t, p, "", msgMorningButton, "500"); err != nil {
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "500 80 70"); err != nil {
 		t.Fatalf("dialog failed: %v", err)
 	}
 
-	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgInvalidSystolic {
-		t.Errorf("sent %v, want [%q]", client.sentTexts, msgInvalidSystolic)
+	if n := len(client.sentTexts); n != 2 || client.sentTexts[n-1] != msgInvalidPressure {
+		t.Errorf("sent %v, want last [%q]", client.sentTexts, msgInvalidPressure)
 	}
-	if s := p.sessions[7]; s == nil || s.state != stateSystolic {
-		t.Errorf("session state = %v, want stateSystolic", s)
+	if s := p.sessions[7]; s == nil || s.state != statePressure {
+		t.Errorf("session state = %v, want statePressure", s)
 	}
 
-	// корректное значение продолжает диалог
-	if err := p.doCmd(ctx, "120", 42, 7, "user"); err != nil {
+	// корректные показания продолжают диалог
+	if err := p.doCmd(ctx, "120 80 70", 42, 7, "user"); err != nil {
 		t.Fatalf("doCmd returned error: %v", err)
 	}
-	if s := p.sessions[7]; s == nil || s.state != stateDiastolic {
-		t.Errorf("session state = %v, want stateDiastolic", s)
+	if _, ok := p.sessions[7]; ok {
+		t.Error("session not removed after valid pressure")
 	}
 }
 
@@ -872,73 +869,45 @@ func TestAddDialog_SysNotGreater(t *testing.T) {
 	client := &mockClient{}
 	p := New(client, &mockStorage{})
 
-	if err := completeDialogSteps(t, p, "", msgMorningButton, "100", "150"); err != nil {
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "100 150 70"); err != nil {
 		t.Fatalf("dialog failed: %v", err)
 	}
 
-	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgSystolicNotGreat {
-		t.Errorf("sent %v, want [%q]", client.sentTexts, msgSystolicNotGreat)
+	if n := len(client.sentTexts); n != 2 || client.sentTexts[n-1] != msgInvalidPressure {
+		t.Errorf("sent %v, want last [%q]", client.sentTexts, msgInvalidPressure)
 	}
-	if s := p.sessions[7]; s == nil || s.state != stateDiastolic {
-		t.Errorf("session state = %v, want stateDiastolic", s)
-	}
-}
-
-func TestAddDialog_InvalidNumber(t *testing.T) {
-	client := &mockClient{}
-	p := New(client, &mockStorage{})
-
-	if err := completeDialogSteps(t, p, "", msgMorningButton, "abc"); err != nil {
-		t.Fatalf("dialog failed: %v", err)
-	}
-
-	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgInvalidNumber {
-		t.Errorf("sent %v, want [%q]", client.sentTexts, msgInvalidNumber)
-	}
-	if s := p.sessions[7]; s == nil || s.state != stateSystolic {
-		t.Errorf("session state = %v, want stateSystolic", s)
+	if s := p.sessions[7]; s == nil || s.state != statePressure {
+		t.Errorf("session state = %v, want statePressure", s)
 	}
 }
 
-func TestAddDialog_DigitBuffer(t *testing.T) {
-	client := &mockClient{}
-	st := &mockStorage{
-		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
-			return true, nil
-		},
-	}
-	p := New(client, st)
-	ctx := context.Background()
-
-	if err := p.doCmd(ctx, AddCmd, 42, 7, "user"); err != nil {
-		t.Fatalf("doCmd returned error: %v", err)
-	}
-	if err := p.doCmd(ctx, msgTodayButton, 42, 7, "user"); err != nil {
-		t.Fatalf("doCmd returned error: %v", err)
-	}
-	if err := p.doCmd(ctx, msgMorningButton, 42, 7, "user"); err != nil {
-		t.Fatalf("doCmd returned error: %v", err)
+func TestAddDialog_InvalidFormat(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"не число", "abc"},
+		{"два числа", "120 80"},
+		{"четыре числа", "120 80 70 60"},
+		{"пусто", ""},
 	}
 
-	taps := []string{"1", "2", "0", msgBackspace, "0", msgSubmit}
-	for _, tap := range taps {
-		if err := p.doCmd(ctx, tap, 42, 7, "user"); err != nil {
-			t.Fatalf("doCmd(%s) returned error: %v", tap, err)
-		}
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client := &mockClient{}
+			p := New(client, &mockStorage{})
 
-	want := []string{
-		fmt.Sprintf(msgValueBuffer, "1"),
-		fmt.Sprintf(msgValueBuffer, "12"),
-		fmt.Sprintf(msgValueBuffer, "120"),
-		fmt.Sprintf(msgValueBuffer, "12"),
-		fmt.Sprintf(msgValueBuffer, "120"),
-	}
-	if !reflect.DeepEqual(client.sentTexts, want) {
-		t.Errorf("sent %v, want %v", client.sentTexts, want)
-	}
-	if s := p.sessions[7]; s == nil || s.state != stateDiastolic {
-		t.Errorf("session state = %v, want stateDiastolic", s)
+			if err := completeDialogSteps(t, p, "", msgMorningButton, c.in); err != nil {
+				t.Fatalf("dialog failed: %v", err)
+			}
+
+			if n := len(client.sentTexts); n != 2 || client.sentTexts[n-1] != msgInvalidPressureFormat {
+				t.Errorf("sent %v, want last [%q]", client.sentTexts, msgInvalidPressureFormat)
+			}
+			if s := p.sessions[7]; s == nil || s.state != statePressure {
+				t.Errorf("session state = %v, want statePressure", s)
+			}
+		})
 	}
 }
 
@@ -996,7 +965,7 @@ func TestAddDialog_Duplicate(t *testing.T) {
 	}
 	p := New(client, st)
 
-	if err := completeDialogSteps(t, p, "", msgMorningButton, "120", "80", "70"); err != nil {
+	if err := completeDialogSteps(t, p, "", msgMorningButton, "120 80 70"); err != nil {
 		t.Fatalf("dialog failed: %v", err)
 	}
 
@@ -1018,7 +987,7 @@ func TestAddDialog_StorageError(t *testing.T) {
 	}
 	p := New(client, st)
 
-	err := completeDialogSteps(t, p, "", msgMorningButton, "120", "80", "70")
+	err := completeDialogSteps(t, p, "", msgMorningButton, "120 80 70")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1028,8 +997,8 @@ func TestAddDialog_StorageError(t *testing.T) {
 	if !strings.Contains(err.Error(), "Ошибка при сохранении показаний давления") {
 		t.Errorf("error missing wrap prefix: %v", err)
 	}
-	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgError {
-		t.Errorf("sent %v, want [%q]", client.sentTexts, msgError)
+	if n := len(client.sentTexts); n != 2 || client.sentTexts[n-1] != msgError {
+		t.Errorf("sent %v, want last [%q]", client.sentTexts, msgError)
 	}
 	if _, ok := p.sessions[7]; ok {
 		t.Error("session not removed on storage error")

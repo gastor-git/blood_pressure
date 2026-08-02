@@ -170,30 +170,16 @@ func (p *Processor) savePressure(ctx context.Context, chatID int, text string, u
 
 	datePart := DayPart(now)
 
-	pressures := getPressures(text)
-	if len(pressures) < 3 {
-		return ErrInvalidPressure
-	}
-
-	sys, err := strconv.Atoi(pressures[0])
+	sys, dia, hr, err := parsePressure(text)
 	if err != nil {
-		return ErrInvalidPressure
-	}
-	dia, err := strconv.Atoi(pressures[1])
-	if err != nil {
-		return ErrInvalidPressure
-	}
-	hr, err := strconv.Atoi(pressures[2])
-	if err != nil {
-		return ErrInvalidPressure
-	}
-
-	if err := validatePressure(sys, dia, hr); err != nil {
+		if errors.Is(err, ErrInvalidPressure) {
+			return ErrInvalidPressure
+		}
 		// Пользовательский ввод вне диапазона — не сбой сервиса.
 		return p.tg.SendMessage(ctx, chatID, msgInvalidPressure)
 	}
 
-	res, err := p.save(ctx, userID, username, now.Format(timeloc.DateFormat), datePart, pressures[0], pressures[1], pressures[2])
+	res, err := p.save(ctx, userID, username, now.Format(timeloc.DateFormat), datePart, sys, dia, hr)
 	if err != nil {
 		_ = p.tg.SendMessage(ctx, chatID, msgError)
 		return err
@@ -278,7 +264,7 @@ func (p *Processor) download(ctx context.Context, chatID int, userID int64, user
 func formatPressures(pressures []storage.Pressure) string {
 	var b strings.Builder
 	for _, p := range pressures {
-		fmt.Fprintf(&b, msgPressureLine, p.Date, p.DayPart, p.Systolic, p.Diastolic, p.HeartRate)
+		fmt.Fprintf(&b, msgPressureLine, formatCSVDate(p.Date), p.DayPart, p.Systolic, p.Diastolic, p.HeartRate)
 	}
 
 	return b.String()
@@ -312,4 +298,34 @@ func isPressure(text string) bool {
 
 func getPressures(text string) []string {
 	return numberRe.FindAllString(text, -1)
+}
+
+// parsePressure разбирает текст «120 80 70» и возвращает значения. Ошибка
+// ErrInvalidPressure — неверный формат, любая другая — вне допустимых диапазонов.
+func parsePressure(text string) (sys, dia, hr string, err error) {
+	pressures := getPressures(text)
+	if len(pressures) < 3 {
+		return "", "", "", ErrInvalidPressure
+	}
+
+	sys, dia, hr = pressures[0], pressures[1], pressures[2]
+
+	s, err := strconv.Atoi(sys)
+	if err != nil {
+		return "", "", "", ErrInvalidPressure
+	}
+	d, err := strconv.Atoi(dia)
+	if err != nil {
+		return "", "", "", ErrInvalidPressure
+	}
+	h, err := strconv.Atoi(hr)
+	if err != nil {
+		return "", "", "", ErrInvalidPressure
+	}
+
+	if err := validatePressure(s, d, h); err != nil {
+		return "", "", "", err
+	}
+
+	return sys, dia, hr, nil
 }
