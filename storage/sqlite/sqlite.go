@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -152,6 +153,92 @@ func (s *Storage) GetAll(ctx context.Context, userID int64) ([]storage.Pressure,
 	}
 
 	return pressures, nil
+}
+
+// ExportAll возвращает все записи, удовлетворяющие фильтру, упорядоченные по
+// user_id, date. Legacy-строки (user_id IS NULL) попадают в выборку: фильтр по
+// user_name их находит, по user_id — нет.
+func (s *Storage) ExportAll(ctx context.Context, filter storage.Filter) ([]storage.Pressure, error) {
+	q := `SELECT date, day_part, systolic, diastolic, heart_rate, user_id, user_name FROM blood_pressure`
+	where, args := buildFilterWhere(filter)
+	if where != "" {
+		q += " WHERE " + where
+	}
+	q += ` ORDER BY user_id, date`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("can't export pressures: %w", err)
+	}
+	defer rows.Close()
+
+	var pressures []storage.Pressure
+	for rows.Next() {
+		var p storage.Pressure
+		// user_id / user_name у legacy-строк могут быть NULL: сканируем через
+		// Null-типы и нормализуем до нулевых значений.
+		var uid sql.NullInt64
+		var uname sql.NullString
+		if err := rows.Scan(&p.Date, &p.DayPart, &p.Systolic, &p.Diastolic, &p.HeartRate, &uid, &uname); err != nil {
+			return nil, fmt.Errorf("can't export pressures: %w", err)
+		}
+		p.UserID = uid.Int64
+		p.UserName = uname.String
+		pressures = append(pressures, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("can't export pressures: %w", err)
+	}
+
+	return pressures, nil
+}
+
+// Delete удаляет записи, удовлетворяющие фильтру, и возвращает число удалённых.
+// Пустой фильтр удаляет все записи.
+func (s *Storage) Delete(ctx context.Context, filter storage.Filter) (int64, error) {
+	q := `DELETE FROM blood_pressure`
+	where, args := buildFilterWhere(filter)
+	if where != "" {
+		q += " WHERE " + where
+	}
+
+	res, err := s.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("can't delete pressures: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("can't delete pressures: %w", err)
+	}
+
+	return n, nil
+}
+
+// buildFilterWhere собирает WHERE-условие из фильтра. Значения только через
+// параметры (?), конкатенация пользовательского ввода в SQL запрещена.
+func buildFilterWhere(filter storage.Filter) (string, []any) {
+	var conds []string
+	var args []any
+
+	if filter.UserID != nil {
+		conds = append(conds, "user_id = ?")
+		args = append(args, *filter.UserID)
+	}
+	if filter.UserName != nil {
+		conds = append(conds, "user_name = ?")
+		args = append(args, *filter.UserName)
+	}
+	if filter.From != nil {
+		conds = append(conds, "date >= ?")
+		args = append(args, *filter.From)
+	}
+	if filter.To != nil {
+		conds = append(conds, "date <= ?")
+		args = append(args, *filter.To)
+	}
+
+	return strings.Join(conds, " AND "), args
 }
 
 // ClaimLegacy привязывает старые записи (user_id IS NULL) к userID по user_name.

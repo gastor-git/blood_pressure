@@ -555,6 +555,170 @@ func TestSetUTCOffset(t *testing.T) {
 	}
 }
 
+// seedPressures наполняет БД фиксированным набором записей для тестов
+// фильтрации: двое пользователей с user_id + одна legacy-строка без user_id.
+func seedPressures(t *testing.T, s *Storage) {
+	t.Helper()
+	ctx := context.Background()
+
+	for _, p := range []*storage.Pressure{
+		{Date: "2026-01-01", DayPart: "утро", Systolic: "120", Diastolic: "80", HeartRate: "70", UserID: 1, UserName: "alice"},
+		{Date: "2026-01-02", DayPart: "день", Systolic: "125", Diastolic: "82", HeartRate: "72", UserID: 1, UserName: "alice"},
+		{Date: "2026-01-02", DayPart: "утро", Systolic: "130", Diastolic: "85", HeartRate: "75", UserID: 2, UserName: "bob"},
+		{Date: "2026-01-03", DayPart: "вечер", Systolic: "135", Diastolic: "88", HeartRate: "78", UserID: 2, UserName: "bob"},
+	} {
+		if _, err := s.Save(ctx, p); err != nil {
+			t.Fatalf("Save(%v) failed: %v", p, err)
+		}
+	}
+	if err := insertLegacy(ctx, s, "2026-01-05", "утро", "140", "90", "80", "carol"); err != nil {
+		t.Fatalf("insertLegacy failed: %v", err)
+	}
+}
+
+// pressure returns a storage.Pressure without repetitive field listing.
+func pressure(date, dayPart, sys, dia, hr string, userID int64, userName string) storage.Pressure {
+	return storage.Pressure{
+		Date: date, DayPart: dayPart, Systolic: sys, Diastolic: dia, HeartRate: hr,
+		UserID: userID, UserName: userName,
+	}
+}
+
+func pressuresEqual(got, want []storage.Pressure) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func int64Ptr(v int64) *int64    { return &v }
+func stringPtr(v string) *string { return &v }
+
+func TestExportAll(t *testing.T) {
+	cases := []struct {
+		name   string
+		filter storage.Filter
+		want   []storage.Pressure
+	}{
+		{
+			name:   "без фильтра",
+			filter: storage.Filter{},
+			// legacy-строка (user_id NULL) сортируется первой: NULL < целых
+			want: []storage.Pressure{
+				pressure("2026-01-05", "утро", "140", "90", "80", 0, "carol"),
+				pressure("2026-01-01", "утро", "120", "80", "70", 1, "alice"),
+				pressure("2026-01-02", "день", "125", "82", "72", 1, "alice"),
+				pressure("2026-01-02", "утро", "130", "85", "75", 2, "bob"),
+				pressure("2026-01-03", "вечер", "135", "88", "78", 2, "bob"),
+			},
+		},
+		{
+			name:   "по user_id",
+			filter: storage.Filter{UserID: int64Ptr(1)},
+			want: []storage.Pressure{
+				pressure("2026-01-01", "утро", "120", "80", "70", 1, "alice"),
+				pressure("2026-01-02", "день", "125", "82", "72", 1, "alice"),
+			},
+		},
+		{
+			name:   "по user_name",
+			filter: storage.Filter{UserName: stringPtr("bob")},
+			want: []storage.Pressure{
+				pressure("2026-01-02", "утро", "130", "85", "75", 2, "bob"),
+				pressure("2026-01-03", "вечер", "135", "88", "78", 2, "bob"),
+			},
+		},
+		{
+			name:   "по user_name находит legacy-строку",
+			filter: storage.Filter{UserName: stringPtr("carol")},
+			want: []storage.Pressure{
+				pressure("2026-01-05", "утро", "140", "90", "80", 0, "carol"),
+			},
+		},
+		{
+			name:   "по диапазону дат (включительно)",
+			filter: storage.Filter{From: stringPtr("2026-01-02"), To: stringPtr("2026-01-03")},
+			want: []storage.Pressure{
+				pressure("2026-01-02", "день", "125", "82", "72", 1, "alice"),
+				pressure("2026-01-02", "утро", "130", "85", "75", 2, "bob"),
+				pressure("2026-01-03", "вечер", "135", "88", "78", 2, "bob"),
+			},
+		},
+		{
+			name:   "комбинированный: user_id + диапазон",
+			filter: storage.Filter{UserID: int64Ptr(1), From: stringPtr("2026-01-01"), To: stringPtr("2026-01-01")},
+			want: []storage.Pressure{
+				pressure("2026-01-01", "утро", "120", "80", "70", 1, "alice"),
+			},
+		},
+		{
+			name:   "пустой результат",
+			filter: storage.Filter{UserID: int64Ptr(999)},
+			want:   nil,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTestStorage(t)
+			seedPressures(t, s)
+
+			got, err := s.ExportAll(context.Background(), c.filter)
+			if err != nil {
+				t.Fatalf("ExportAll() failed: %v", err)
+			}
+			if !pressuresEqual(got, c.want) {
+				t.Errorf("ExportAll() = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestDelete(t *testing.T) {
+	cases := []struct {
+		name   string
+		filter storage.Filter
+		want   int64
+	}{
+		{"без фильтра (все записи)", storage.Filter{}, 5},
+		{"по user_id", storage.Filter{UserID: int64Ptr(1)}, 2},
+		{"по user_name", storage.Filter{UserName: stringPtr("bob")}, 2},
+		{"по user_name находит legacy-строку", storage.Filter{UserName: stringPtr("carol")}, 1},
+		{"по диапазону дат", storage.Filter{From: stringPtr("2026-01-02"), To: stringPtr("2026-01-03")}, 3},
+		{"комбинированный", storage.Filter{UserID: int64Ptr(2), From: stringPtr("2026-01-01"), To: stringPtr("2026-01-02")}, 1},
+		{"пустой результат", storage.Filter{UserID: int64Ptr(999)}, 0},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTestStorage(t)
+			seedPressures(t, s)
+
+			got, err := s.Delete(context.Background(), c.filter)
+			if err != nil {
+				t.Fatalf("Delete() failed: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("Delete() = %d, want %d", got, c.want)
+			}
+
+			// после удаления выборка без фильтра не содержит удалённых записей
+			left, err := s.ExportAll(context.Background(), storage.Filter{})
+			if err != nil {
+				t.Fatalf("ExportAll() after Delete() failed: %v", err)
+			}
+			if int64(len(left)) != 5-c.want {
+				t.Errorf("rows left = %d, want %d", len(left), 5-c.want)
+			}
+		})
+	}
+}
+
 func TestMigrations_Idempotent(t *testing.T) {
 	s := newTestStorage(t) // первый Init внутри
 	ctx := context.Background()

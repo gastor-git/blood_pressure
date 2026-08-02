@@ -34,3 +34,12 @@ dc_down:
 test:
 	go test ./... -count=1 -race -cover
 
+
+##################
+# CLI
+##################
+
+cli_help:   go run . help
+cli_export: go run . export $(ARGS)
+cli_delete: go run . delete $(ARGS)
+

@@ -1,70 +1,66 @@
-# План: персональная таймзона пользователя
+# План: CLI для управления БД
 
-Задача из IMPROVEMENTS.md: определять текущее время пользователя (и текущее время суток) из данных клиента Telegram (часовой пояс) и при записи данных в БД использовать время пользователя.
+## Архитектура
 
-Объём (согласовано): запись + `/show` + персональный `notifier`, хранение пояса в БД.
+Точка входа — подкоманды в `main.go` (`go run . export|delete|help`). Логика CLI выносится в новый пакет `cli/`, который потребляет интерфейс (объявлен на стороне потребителя, как принято в проекте) с методами выборки/удаления. Бот запускается без аргументов как раньше, `TG_KEY` для CLI не требуется.
 
-## Суть
+## 1. `storage/storage.go` — общий фильтр
 
-Telegram отдаёт часовой пояс только через `getChat` → `ChatFullInfo.utc_offset` (секунды от UTC, для личных чатов, `0` = неизвестно). Запрос кэшируется (как `claimed`), результат пишется в БД (`users.utc_offset`, миграция 4). Все вычисления «сегодня / часть суток» при записи, в `/show` и в `notifier` идут в локали пользователя; fallback — `lib/timeloc` (серверная `Asia/Yekaterinburg`), если offset неизвестен (`0` или ошибка `getChat`).
+Добавить тип `Filter`:
 
-## Шаги
+```go
+type Filter struct {
+    UserID   *int64   // nil — без фильтра
+    UserName *string  // точное совпадение по user_name
+    From     *string  // включительно, формат DateFormat (YYYY-MM-DD)
+    To       *string  // включительно, формат DateFormat
+}
+```
 
-### 1. `clients/telegram` — метод `GetChat`
+## 2. `storage/sqlite/sqlite.go` — новые методы конкретного типа
 
-- `types.go`: тип `ChatFullInfo{ID int64; UTCOffset int}` (json `utc_offset`) + обёртка ответа `GetChatResponse` (Ok/ErrorCode/Description/Parameters/Result `*ChatFullInfo`), `toError` по образцу `UpdatesResponse`.
-- `telegram.go`: константа `getChatMethod = "getChat"`, метод `GetChat(ctx, chatID int) (*ChatFullInfo, error)` через `doRequest` + проверка `ok`.
-- `telegram_test.go`: `TestGetChat` (путь, `chat_id`, распарсенный offset), `TestGetChat_OKFalse` (APIError).
+Методы добавляются только на `*Storage` (не в интерфейс `storage.Storage` — не трогаем моки `commands_test.go` и слой бота):
 
-### 2. `storage` — интерфейс, миграция 4, реализация
+- `ExportAll(ctx, filter storage.Filter) ([]storage.Pressure, error)` — динамический `WHERE` с параметрами `?` (user_id / user_name / date >= / date <=), `ORDER BY user_id, date`. Никакой конкатенации значений в SQL.
+- `Delete(ctx, filter storage.Filter) (int64, error)` — `DELETE ... WHERE`, возвращает `RowsAffected`.
+- Хелпер построения `WHERE` + среза аргументов (общий для обоих).
 
-- `storage.go`:
-  - `User` += `UTCOffset int`.
-  - `Show(ctx, userID int64, date string)` — дата передаётся явно (вместо внутреннего `timeloc.Now()`).
-  - `UsersWithoutPressure` удалить.
-  - Добавить `SetUTCOffset(ctx, userID int64, offset int) error` и `AllUsers(ctx) ([]User, error)`.
-- `sqlite/migrations.go`: `migration4` — `ALTER TABLE users ADD COLUMN utc_offset INTEGER NOT NULL DEFAULT 0`; добавить в срез.
-- `sqlite/sqlite.go`: `Show` фильтрует по переданной дате; `AllUsers` (`SELECT user_id, chat_id, user_name, utc_offset ORDER BY user_id`); `SetUTCOffset` (`UPDATE users SET utc_offset = ? WHERE user_id = ?`); удалить `UsersWithoutPressure`. `RegisterUser` не меняется (offset 0 по DEFAULT, заполняется `SetUTCOffset`).
-- `sqlite/sqlite_test.go`: обновить вызовы `Show(ctx, id, date)` (передавать `today(t)`); заменить `TestUsersWithoutPressure*` и использования в `TestRegisterUser_*` на `TestAllUsers` и `TestSetUTCOffset`; проверить миграцию 4 (версия `len(migrations)`, колонка `utc_offset`).
+Примечание: legacy-строки (`user_id IS NULL`) попадают в экспорт и удаление, фильтр по `user_name` их находит, по `user_id` — нет.
 
-### 3. `events/telegram` — кэш offset + применение при записи и `/show`
+## 3. Новый пакет `cli/`
 
-- `telegram.go`: в интерфейс `Client` добавить `GetChat(ctx, chatID int) (*tgClient.ChatFullInfo, error)`; в `Processor` поле `utcOffsets map[int64]int` (без мьютекса, консьюмер однопоточный), инициализация в `New`.
-- Новый `userloc.go`:
-  - `ensureTimezone(ctx, chatID, userID)` — если offset в кэше, выйти; иначе `GetChat`, закэшировать (даже `0`), при `!=0` — `SetUTCOffset`; при ошибке — `log` (санитизированная ошибка клиента) и не кэшировать (повтор на следующем сообщении).
-  - `userLoc(userID) *time.Location` — `time.FixedZone("", off)` при `off != 0`, иначе `timeloc.Location()`.
-  - `userNow(ctx, chatID, userID) time.Time` = `time.Now().In(userLoc(...))` (после `ensureTimezone`).
-  - `userToday(...) string` — `userNow().Format(timeloc.DateFormat)`.
-- `commands.go`:
-  - `doCmd`: после `RegisterUser` вызывать `p.ensureTimezone(ctx, chatID, userID)` (нужно для персиста пояса, даже если пользователь только смотрит `/show`).
-  - `savePressure`: `now := p.userNow(ctx, chatID, userID)` вместо `timeloc.Now()`.
-  - `show`: `p.storage.Show(ctx, userID, p.userToday(ctx, chatID, userID))`.
-  - `download` — без изменений (вне задачи).
-- `dialog.go`: `sendDatePrompt`/`sendDayPartPrompt`/`handleDate` получают `userID` и используют `userNow`/`userToday` (метка «Сегодня», проверка будущей даты, подсказка части суток). `startAdd`/`handleDialog` прокидывают `userID`.
-- `commands_test.go`:
-  - `mockClient.GetChat` (по умолчанию `UTCOffset: 0` → fallback, старые тесты не ломаются; считать вызовы), `mockStorage.Show(ctx, id, date)`, добавить `SetUTCOffset`/`AllUsers`.
-  - Новые тесты: кэш `GetChat` вызывается 1 раз; запись с большим offset (напр. `+14h`) сохраняет локальную дату/часть суток пользователя; `/show` передаёт локальную дату; fallback при ошибке/нулевом offset.
+- `cli/cli.go` — `Run(args []string, s store) error`; интерфейс `store { Init; ExportAll; Delete; Close }`; роутинг `export|delete|help`, на незнакомую команду — ошибка с подсказкой `help`. Каждая подкоманда парсит свой `flag.FlagSet`.
+- `cli/export.go` — флаги `-user-id N`, `-user-name NAME`, `-from DD.MM.YYYY`, `-to DD.MM.YYYY`, `-out PATH` (по умолчанию `export_<сегодня>.csv`). `formatExportCSV` — по аналогии с `/download`, но с двумя колонками идентификации пользователя. Заголовок **`User_ID;User_name;Дата;Утро;День;Вечер`**: строка на (пользователь, дата), отсутствующие части суток — пустые ячейки, BOM + CRLF, сортировка по дате. `User_ID` — из записи, `User_name` — `user_name` (при пустом — пустая ячейка; `User_ID` для legacy-строк пустой). Если данных нет — сообщение и без создания файла.
+- `cli/delete.go` — те же флаги + `-yes`. Без `--yes` — отказ с предупреждением; без фильтров = удаление всех данных. Печать «Удалено N записей».
+- `cli/help.go` — текст с описанием формата и опций всех команд + примеры.
+- Хелпер `parseCLIDate` — `ДД.ММ.ГГГГ` → `YYYY-MM-DD` (валидация через `timeloc.UserDateFormat`/`DateFormat`, проверка `from <= to`).
+- Порядок частей суток — локальная константа `["утро","день","вечер"]` (в `events/telegram` они не экспортируются; не тащим зависимость на слой бота).
 
-### 4. `notifier` — персональные пояса
+## 4. `main.go` — диспетчеризация
 
-- `notifier.go`:
-  - Интерфейс `Storage`: `AllUsers(ctx)` + `Get(ctx, userID, date, dayPart)` вместо `UsersWithoutPressure`.
-  - `nextTrigger(now time.Time, loc *time.Location)` — параметризовать локацию.
-  - `userLoc(offset int) *time.Location` (offset 0 → `timeloc.Location()`); `isReminderMinute(t)` — час из `reminderHours` и минута `reminderMinute`.
-  - `Start`: `AllUsers` → мин. `nextTrigger` по всем пользователям (fallback серверная ТЗ при пустом списке/ошибке) → таймер → `notify(ctx, time.Now())`.
-  - `notify(ctx, now)`: для каждого пользователя локальное время; если `isReminderMinute` — дата = локальный день, метка = `telegram.DayPart(localNow)`; если `Get` вернул `nil` (нет записи) — напоминание `MsgReminder`.
-- `notifier_test.go`: `nextTrigger(c.now, timeloc.Location())`; mockStorage `AllUsers`/`Get`; `TestNotify_PerUserTimezones` (разные offsets — напоминания только тем, у кого локально наступил триггер), `TestNotify_AlreadyRecorded` (Get вернул запись — пропуск), `TestIsReminderMinute`; обновить `TestNotify` и тесты ошибок.
+До запуска бота: если `os.Args[1]` ∈ {`export`,`delete`,`help`} → `runCLI()`: открыть `sqlite.New(sqliteStoragePath)` (та же константа), `Init`, `cli.Run(os.Args[1:], s)`, `Close`, выход с кодом 0/1. `mustToken()` вызывается только в ветке бота.
 
-### 5. `README.md`
+## 5. `Makefile` — алиасы
 
-- Обновить таблицу структуры (`GetChat` в клиенте, `userloc.go`, `Show(date)`, `AllUsers`/`SetUTCOffset`, миграция 4, персональный notifier), раздел стиля (таймзона: `getChat.utc_offset` + fallback на `timeloc`; `utc_offset == 0` трактуется как неизвестный → серверная ТЗ; ограничение — реальные UTC-пользователи получат серверную ТЗ), правила тестирования.
+```make
+cli_help:   go run . help
+cli_export: go run . export $(ARGS)
+cli_delete: go run . delete $(ARGS)
+```
 
-### 6. Верификация
+Примеры: `make cli_export ARGS="--user-name alice --from 01.01.2026"`, `make cli_delete ARGS="--yes"`.
+
+## 6. Тесты
+
+- `storage/sqlite/sqlite_test.go` — `TestExportAll` / `TestDelete` (без фильтра, по `user_id`, по `user_name`, по диапазону дат, комбинированные, пустой результат, счётчик удалённых). В том же table-driven стиле, файл в `t.TempDir()`.
+- `cli/cli_test.go` — `formatExportCSV` (заголовок `User_ID;User_name;Дата;Утро;День;Вечер`, группировка по пользователю/дате, пустые ячейки), `parseCLIDate` (валид/невалид), построение `storage.Filter` из флагов, отказ `delete` без `--yes`. Для `Run` — фейковый `store`.
+
+## 7. `README.md`
+
+Обновить: структуру репозитория (строка про `cli/`), раздел команд разработки (документация CLI и новых Makefile-таргетов), строку Makefile в таблице.
+
+## Верификация
 
 `go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`.
 
-## Открытые моменты / границы
-
-- `utc_offset == 0` неразличим: «реальный UTC» и «неизвестно» → fallback на серверную ТЗ (ограничение API).
-- Кэш `utcOffsets` живёт до рестарта; offset может устареть при смене DST/перемещении — допустимо, перечитывается при следующем рестарте (и сохраняется в БД).
-- `/download` (имя файла) остаётся на серверной ТЗ — вне задачи.
+Замечание по эксплуатации: CLI ходит в ту же БД, что и запущенный бот (WAL, `_busy_timeout=5000`) — при активном боте возможна задержка записи до 5с; для «delete» безопаснее останавливать бот.

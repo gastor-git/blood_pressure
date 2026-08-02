@@ -44,3 +44,12 @@ type Pressure struct {
 	UserID    int64
 	UserName  string
 }
+
+// Filter — критерии выборки/удаления записей (CLI export/delete).
+// Все поля опциональны: nil — без соответствующего условия.
+type Filter struct {
+	UserID   *int64  // nil — без фильтра
+	UserName *string // точное совпадение по user_name
+	From     *string // включительно, формат DateFormat (YYYY-MM-DD)
+	To       *string // включительно, формат DateFormat
+}
