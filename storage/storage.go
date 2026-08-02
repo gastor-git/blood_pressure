@@ -12,7 +12,8 @@ type Storage interface {
 	// Update перезаписывает значения существующей записи по ключу
 	// (user_id, date, day_part).
 	Update(ctx context.Context, p *Pressure) error
-	Show(ctx context.Context, userID int64) ([]Pressure, error)
+	// Show возвращает показания пользователя за конкретную дату.
+	Show(ctx context.Context, userID int64, date string) ([]Pressure, error)
 	// GetAll возвращает все показания пользователя за всё время.
 	GetAll(ctx context.Context, userID int64) ([]Pressure, error)
 	// ClaimLegacy привязывает старые записи (user_id IS NULL) к userID по
@@ -20,14 +21,18 @@ type Storage interface {
 	ClaimLegacy(ctx context.Context, userID int64, userName string) error
 	// RegisterUser — upsert пользователя при каждом входящем сообщении.
 	RegisterUser(ctx context.Context, userID int64, chatID int64, userName string) error
-	// UsersWithoutPressure — пользователи без записи за дату+часть суток.
-	UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]User, error)
+	// SetUTCOffset сохраняет смещение таймзоны пользователя (секунды от UTC)
+	// из getChat. Вызывается только при отличном от нуля offset.
+	SetUTCOffset(ctx context.Context, userID int64, offset int) error
+	// AllUsers возвращает всех зарегистрированных пользователей.
+	AllUsers(ctx context.Context) ([]User, error)
 }
 
 type User struct {
-	UserID   int64
-	ChatID   int64
-	UserName string
+	UserID    int64
+	ChatID    int64
+	UserName  string
+	UTCOffset int
 }
 
 type Pressure struct {

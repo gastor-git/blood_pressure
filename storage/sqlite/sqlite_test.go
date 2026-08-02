@@ -78,7 +78,7 @@ func TestSave_Duplicate(t *testing.T) {
 		t.Error("second Save() = true, want false (duplicate)")
 	}
 
-	res, err := s.Show(ctx, 1)
+	res, err := s.Show(ctx, 1, today(t))
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestShow_Today(t *testing.T) {
 		t.Fatalf("Save() failed: %v", err)
 	}
 
-	res, err := s.Show(ctx, 1)
+	res, err := s.Show(ctx, 1, date)
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestShow_ByUserID(t *testing.T) {
 		t.Fatalf("Save(p2) failed: %v", err)
 	}
 
-	res1, err := s.Show(ctx, 1)
+	res1, err := s.Show(ctx, 1, date)
 	if err != nil {
 		t.Fatalf("Show(1) failed: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestShow_ByUserID(t *testing.T) {
 		t.Errorf("Show(1) = %+v, want single record 120/...", res1)
 	}
 
-	res2, err := s.Show(ctx, 2)
+	res2, err := s.Show(ctx, 2, date)
 	if err != nil {
 		t.Fatalf("Show(2) failed: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestShow_OtherDay(t *testing.T) {
 		t.Fatalf("Save() failed: %v", err)
 	}
 
-	res, err := s.Show(ctx, 1)
+	res, err := s.Show(ctx, 1, today(t))
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestShow_OtherDay(t *testing.T) {
 func TestShow_Empty(t *testing.T) {
 	s := newTestStorage(t)
 
-	res, err := s.Show(context.Background(), 999)
+	res, err := s.Show(context.Background(), 999, today(t))
 	if err != nil {
 		t.Errorf("Show() error = %v, want nil", err)
 	}
@@ -367,7 +367,7 @@ func TestClaimLegacy(t *testing.T) {
 	}
 
 	// до привязки запись не видна по user_id
-	res, err := s.Show(ctx, 1)
+	res, err := s.Show(ctx, 1, date)
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestClaimLegacy(t *testing.T) {
 		t.Fatalf("ClaimLegacy() failed: %v", err)
 	}
 
-	res, err = s.Show(ctx, 1)
+	res, err = s.Show(ctx, 1, date)
 	if err != nil {
 		t.Fatalf("Show() after claim failed: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestClaimLegacy_OtherUserUntouched(t *testing.T) {
 	}
 
 	// user2 остался непривязанным — его запись не видна ни под чьим user_id
-	res, err := s.Show(ctx, 2)
+	res, err := s.Show(ctx, 2, today(t))
 	if err != nil {
 		t.Fatalf("Show(2) failed: %v", err)
 	}
@@ -430,16 +430,19 @@ func TestRegisterUser_Insert(t *testing.T) {
 		t.Fatalf("RegisterUser() failed: %v", err)
 	}
 
-	users, err := s.UsersWithoutPressure(ctx, today(t), "утро")
+	users, err := s.AllUsers(ctx)
 	if err != nil {
-		t.Fatalf("UsersWithoutPressure() failed: %v", err)
+		t.Fatalf("AllUsers() failed: %v", err)
 	}
 	if len(users) != 1 {
-		t.Fatalf("UsersWithoutPressure() returned %d users, want 1", len(users))
+		t.Fatalf("AllUsers() returned %d users, want 1", len(users))
 	}
 	got := users[0]
 	if got.UserID != 1 || got.ChatID != 42 || got.UserName != "user1" {
-		t.Errorf("UsersWithoutPressure() = %+v, want {1 42 user1}", got)
+		t.Errorf("AllUsers() = %+v, want {1 42 user1}", got)
+	}
+	if got.UTCOffset != 0 {
+		t.Errorf("UTCOffset = %d, want 0 (default)", got.UTCOffset)
 	}
 }
 
@@ -463,23 +466,22 @@ func TestRegisterUser_Upsert(t *testing.T) {
 		t.Errorf("users count = %d, want 1", count)
 	}
 
-	users, err := s.UsersWithoutPressure(ctx, today(t), "утро")
+	users, err := s.AllUsers(ctx)
 	if err != nil {
-		t.Fatalf("UsersWithoutPressure() failed: %v", err)
+		t.Fatalf("AllUsers() failed: %v", err)
 	}
 	if len(users) != 1 {
-		t.Fatalf("UsersWithoutPressure() returned %d users, want 1", len(users))
+		t.Fatalf("AllUsers() returned %d users, want 1", len(users))
 	}
 	got := users[0]
 	if got.ChatID != 43 || got.UserName != "user_renamed" {
-		t.Errorf("UsersWithoutPressure() = %+v, want updated {1 43 user_renamed}", got)
+		t.Errorf("AllUsers() = %+v, want updated {1 43 user_renamed}", got)
 	}
 }
 
-func TestUsersWithoutPressure(t *testing.T) {
+func TestAllUsers(t *testing.T) {
 	s := newTestStorage(t)
 	ctx := context.Background()
-	date := today(t)
 
 	// трое зарегистрированных пользователей
 	for _, u := range []struct {
@@ -496,47 +498,60 @@ func TestUsersWithoutPressure(t *testing.T) {
 		}
 	}
 
-	// alice уже передала показания за утро
-	p := &storage.Pressure{
-		Date:      date,
-		DayPart:   "утро",
-		Systolic:  "120",
-		Diastolic: "80",
-		HeartRate: "70",
-		UserID:    1,
-		UserName:  "alice",
-	}
-	if _, err := s.Save(ctx, p); err != nil {
-		t.Fatalf("Save() failed: %v", err)
+	// у bob известен таймзона-offset, у остальных — дефолтный 0
+	if err := s.SetUTCOffset(ctx, 2, 14*3600); err != nil {
+		t.Fatalf("SetUTCOffset() failed: %v", err)
 	}
 
-	// legacy-строка без user_id (не принадлежит пользователю, не блокирует)
-	if err := insertLegacy(ctx, s, date, "утро", "130", "85", "75", "alice"); err != nil {
-		t.Fatalf("insertLegacy failed: %v", err)
-	}
-
-	users, err := s.UsersWithoutPressure(ctx, date, "утро")
+	users, err := s.AllUsers(ctx)
 	if err != nil {
-		t.Fatalf("UsersWithoutPressure() failed: %v", err)
+		t.Fatalf("AllUsers() failed: %v", err)
 	}
-	if len(users) != 2 {
-		t.Fatalf("UsersWithoutPressure() returned %d users, want 2", len(users))
+	if len(users) != 3 {
+		t.Fatalf("AllUsers() returned %d users, want 3", len(users))
 	}
-	if users[0].UserID == 1 || users[1].UserID == 1 {
-		t.Errorf("alice (передала показания) не должна попасть в выборку: %+v", users)
+	if users[0].UserID != 1 || users[1].UserID != 2 || users[2].UserID != 3 {
+		t.Errorf("users order = %+v, want [1 2 3]", users)
+	}
+	if users[1].UTCOffset != 14*3600 {
+		t.Errorf("users[1].UTCOffset = %d, want %d", users[1].UTCOffset, 14*3600)
+	}
+	if users[0].UTCOffset != 0 || users[2].UTCOffset != 0 {
+		t.Errorf("default UTCOffset = %d/%d, want 0/0", users[0].UTCOffset, users[2].UTCOffset)
 	}
 }
 
-func TestUsersWithoutPressure_Empty(t *testing.T) {
+func TestAllUsers_Empty(t *testing.T) {
 	s := newTestStorage(t)
 	ctx := context.Background()
 
-	users, err := s.UsersWithoutPressure(ctx, today(t), "вечер")
+	users, err := s.AllUsers(ctx)
 	if err != nil {
-		t.Errorf("UsersWithoutPressure() error = %v, want nil", err)
+		t.Errorf("AllUsers() error = %v, want nil", err)
 	}
 	if len(users) != 0 {
-		t.Errorf("UsersWithoutPressure() = %+v, want empty slice", users)
+		t.Errorf("AllUsers() = %+v, want empty slice", users)
+	}
+}
+
+func TestSetUTCOffset(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	if err := s.RegisterUser(ctx, 1, 42, "user1"); err != nil {
+		t.Fatalf("RegisterUser() failed: %v", err)
+	}
+
+	if err := s.SetUTCOffset(ctx, 1, 9*3600); err != nil {
+		t.Fatalf("SetUTCOffset() failed: %v", err)
+	}
+
+	users, err := s.AllUsers(ctx)
+	if err != nil {
+		t.Fatalf("AllUsers() failed: %v", err)
+	}
+	if len(users) != 1 || users[0].UTCOffset != 9*3600 {
+		t.Errorf("AllUsers() = %+v, want UTCOffset %d", users, 9*3600)
 	}
 }
 
@@ -596,12 +611,17 @@ func TestMigrations_FromLegacySchema(t *testing.T) {
 	if err := s.ClaimLegacy(ctx, 1, "user1"); err != nil {
 		t.Fatalf("ClaimLegacy() failed: %v", err)
 	}
-	res, err := s.Show(ctx, 1)
+	res, err := s.Show(ctx, 1, today(t))
 	if err != nil {
 		t.Fatalf("Show() failed: %v", err)
 	}
 	if len(res) != 1 {
 		t.Errorf("Show() = %+v, want single migrated record", res)
+	}
+
+	// migration4 добавила utc_offset в users
+	if !hasColumn(ctx, t, s, "users", "utc_offset") {
+		t.Error("column utc_offset not created in users")
 	}
 }
 

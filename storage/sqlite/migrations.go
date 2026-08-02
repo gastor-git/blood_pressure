@@ -13,6 +13,7 @@ var migrations = []func(context.Context, *sql.Tx) error{
 	migration1,
 	migration2,
 	migration3,
+	migration4,
 }
 
 // migrate приводит схему к последней версии. Текущая версия хранится в
@@ -114,6 +115,18 @@ func migration3(ctx context.Context, tx *sql.Tx) error {
 
 	if _, err := tx.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("can't create users table: %w", err)
+	}
+
+	return nil
+}
+
+// migration4 — персональная таймзона пользователя: utc_offset (секунды от UTC)
+// из getChat. 0 = неизвестно (или реальный UTC) → fallback на серверную таймзону.
+func migration4(ctx context.Context, tx *sql.Tx) error {
+	q := `ALTER TABLE users ADD COLUMN utc_offset INTEGER NOT NULL DEFAULT 0`
+
+	if _, err := tx.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("can't add utc_offset column: %w", err)
 	}
 
 	return nil

@@ -28,6 +28,7 @@ const (
 	getUpdatesMethod   = "getUpdates"
 	sendMessageMethod  = "sendMessage"
 	sendDocumentMethod = "sendDocument"
+	getChatMethod      = "getChat"
 
 	// longPollTimeout — время удержания соединения getUpdates на стороне Telegram.
 	longPollTimeout = 25
@@ -78,6 +79,32 @@ func (c *Client) Updates(ctx context.Context, offset int, limit int) (updates []
 
 func (c *Client) SendMessage(ctx context.Context, chatID int, text string) error {
 	return c.sendMessage(ctx, chatID, text, "")
+}
+
+// GetChat запрашивает информацию о чате (личный чат). utc_offset в ответе —
+// смещение таймзоны пользователя в секундах от UTC; 0 = неизвестно.
+func (c *Client) GetChat(ctx context.Context, chatID int) (info *ChatFullInfo, err error) {
+	defer func() { err = e.WrapIfErr("can't get chat", err) }()
+
+	q := url.Values{}
+	q.Add("chat_id", strconv.Itoa(chatID))
+
+	data, err := c.doRequest(ctx, getChatMethod, q)
+	if err != nil {
+		return nil, err
+	}
+
+	var res GetChatResponse
+
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, err
+	}
+
+	if !res.Ok {
+		return nil, res.toError()
+	}
+
+	return res.Result, nil
 }
 
 // SendKeyboard отправляет сообщение с кастомной reply-клавиатурой. При

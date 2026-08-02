@@ -46,7 +46,7 @@ var (
 func (p *Processor) startAdd(ctx context.Context, chatID int, userID int64, username string) error {
 	p.sessions[userID] = &session{state: stateDate, userName: username}
 
-	return p.sendDatePrompt(ctx, chatID)
+	return p.sendDatePrompt(ctx, chatID, userID)
 }
 
 // handleDialog обрабатывает очередное сообщение активного диалога.
@@ -55,9 +55,9 @@ func (p *Processor) handleDialog(ctx context.Context, chatID int, userID int64, 
 
 	switch s.state {
 	case stateDate:
-		return p.handleDate(ctx, chatID, s, text)
+		return p.handleDate(ctx, chatID, userID, s, text)
 	case stateDayPart:
-		return p.handleDayPart(ctx, chatID, s, text)
+		return p.handleDayPart(ctx, chatID, userID, s, text)
 	case statePressure:
 		return p.handlePressure(ctx, chatID, userID, s, text)
 	case stateConfirmOverwrite:
@@ -67,22 +67,22 @@ func (p *Processor) handleDialog(ctx context.Context, chatID int, userID int64, 
 	}
 }
 
-func (p *Processor) sendDatePrompt(ctx context.Context, chatID int) error {
-	today := timeloc.Now().Format(timeloc.UserDateFormat)
+func (p *Processor) sendDatePrompt(ctx context.Context, chatID int, userID int64) error {
+	today := p.userNow(ctx, chatID, userID).Format(timeloc.UserDateFormat)
 
 	return p.tg.SendKeyboard(ctx, chatID, fmt.Sprintf(msgPromptDate, today), dateKeyboard, true)
 }
 
-func (p *Processor) sendDayPartPrompt(ctx context.Context, chatID int) error {
-	return p.tg.SendKeyboard(ctx, chatID, fmt.Sprintf(msgPromptDayPart, DayPart(timeloc.Now())), dayPartKeyboard, true)
+func (p *Processor) sendDayPartPrompt(ctx context.Context, chatID int, userID int64) error {
+	return p.tg.SendKeyboard(ctx, chatID, fmt.Sprintf(msgPromptDayPart, DayPart(p.userNow(ctx, chatID, userID))), dayPartKeyboard, true)
 }
 
-func (p *Processor) handleDate(ctx context.Context, chatID int, s *session, text string) error {
+func (p *Processor) handleDate(ctx context.Context, chatID int, userID int64, s *session, text string) error {
 	if strings.EqualFold(text, msgTodayButton) {
-		s.date = timeloc.Today()
+		s.date = p.userToday(ctx, chatID, userID)
 		s.state = stateDayPart
 
-		return p.sendDayPartPrompt(ctx, chatID)
+		return p.sendDayPartPrompt(ctx, chatID, userID)
 	}
 
 	date, err := parseUserDate(text)
@@ -90,14 +90,14 @@ func (p *Processor) handleDate(ctx context.Context, chatID int, s *session, text
 		return p.tg.SendMessage(ctx, chatID, msgInvalidDate)
 	}
 
-	if date > timeloc.Today() {
+	if date > p.userToday(ctx, chatID, userID) {
 		return p.tg.SendMessage(ctx, chatID, msgFutureDate)
 	}
 
 	s.date = date
 	s.state = stateDayPart
 
-	return p.sendDayPartPrompt(ctx, chatID)
+	return p.sendDayPartPrompt(ctx, chatID, userID)
 }
 
 // parseUserDate разбирает дату из формата ДД.ММ.ГГГГ и возвращает в формате
@@ -111,7 +111,7 @@ func parseUserDate(text string) (string, error) {
 	return t.Format(timeloc.DateFormat), nil
 }
 
-func (p *Processor) handleDayPart(ctx context.Context, chatID int, s *session, text string) error {
+func (p *Processor) handleDayPart(ctx context.Context, chatID int, userID int64, s *session, text string) error {
 	part, ok := dayPartKey(text)
 	if !ok {
 		return p.tg.SendMessage(ctx, chatID, msgInvalidDayPart)

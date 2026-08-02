@@ -102,12 +102,10 @@ func (s *Storage) Update(ctx context.Context, p *storage.Pressure) error {
 	return nil
 }
 
-// Show возвращает сегодняшние показания пользователя по user_id.
-func (s *Storage) Show(ctx context.Context, userID int64) ([]storage.Pressure, error) {
-	now := timeloc.Now()
-
+// Show возвращает показания пользователя за конкретную дату.
+func (s *Storage) Show(ctx context.Context, userID int64, date string) ([]storage.Pressure, error) {
 	q := `SELECT date, day_part, systolic, diastolic, heart_rate, user_id, user_name FROM blood_pressure WHERE user_id = ? AND date = ?`
-	rows, err := s.db.QueryContext(ctx, q, userID, now.Format(timeloc.DateFormat))
+	rows, err := s.db.QueryContext(ctx, q, userID, date)
 	if err != nil {
 		return nil, fmt.Errorf("can't show Pressure: %w", err)
 	}
@@ -182,35 +180,42 @@ func (s *Storage) RegisterUser(ctx context.Context, userID int64, chatID int64, 
 	return nil
 }
 
-// UsersWithoutPressure возвращает пользователей, у которых нет записи за
-// дату+часть суток. Legacy-записи с user_id IS NULL не блокируют напоминание:
-// они не принадлежат ни одному зарегистрированному пользователю.
-func (s *Storage) UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]storage.User, error) {
-	q := `SELECT u.user_id, u.chat_id, u.user_name FROM users u
-		WHERE NOT EXISTS (
-			SELECT 1 FROM blood_pressure bp
-			WHERE bp.user_id = u.user_id AND bp.date = ? AND bp.day_part = ?
-		)`
+// AllUsers возвращает всех зарегистрированных пользователей с их utc_offset.
+// Отбор получателей напоминаний (по дате/части суток в персональной таймзоне)
+// выполняется в notifier.
+func (s *Storage) AllUsers(ctx context.Context) ([]storage.User, error) {
+	q := `SELECT user_id, chat_id, user_name, utc_offset FROM users ORDER BY user_id`
 
-	rows, err := s.db.QueryContext(ctx, q, date, dayPart)
+	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
-		return nil, fmt.Errorf("can't get users without pressure: %w", err)
+		return nil, fmt.Errorf("can't get users: %w", err)
 	}
 	defer rows.Close()
 
 	var users []storage.User
 	for rows.Next() {
 		var u storage.User
-		if err := rows.Scan(&u.UserID, &u.ChatID, &u.UserName); err != nil {
-			return nil, fmt.Errorf("can't get users without pressure: %w", err)
+		if err := rows.Scan(&u.UserID, &u.ChatID, &u.UserName, &u.UTCOffset); err != nil {
+			return nil, fmt.Errorf("can't get users: %w", err)
 		}
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("can't get users without pressure: %w", err)
+		return nil, fmt.Errorf("can't get users: %w", err)
 	}
 
 	return users, nil
+}
+
+// SetUTCOffset сохраняет utc_offset (секунды от UTC) для пользователя.
+func (s *Storage) SetUTCOffset(ctx context.Context, userID int64, offset int) error {
+	q := `UPDATE users SET utc_offset = ? WHERE user_id = ?`
+
+	if _, err := s.db.ExecContext(ctx, q, offset, userID); err != nil {
+		return fmt.Errorf("can't set utc offset: %w", err)
+	}
+
+	return nil
 }
 
 // Init приводит схему БД к последней версии через механизм миграций.

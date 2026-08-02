@@ -115,6 +115,10 @@ func (p *Processor) doCmd(ctx context.Context, text string, chatID int, userID i
 		return e.Wrap("не удалось сохранить пользователя", err)
 	}
 
+	// Таймзона нужна для персиста пояса и локальных «сегодня/часть суток»,
+	// поэтому подтягивается при каждом сообщении (кэш — один getChat).
+	p.ensureTimezone(ctx, chatID, userID)
+
 	// Активный диалог /add: команда отменяет его, всё остальное — шаг диалога.
 	if s, ok := p.sessions[userID]; ok && s.state != stateIdle {
 		if strings.HasPrefix(text, "/") {
@@ -167,7 +171,7 @@ func (p *Processor) savePressure(ctx context.Context, chatID int, text string, u
 		err = e.WrapIfErr("Ошибка при сохранении показаний давления", err)
 	}()
 
-	now := timeloc.Now()
+	now := p.userNow(ctx, chatID, userID)
 
 	datePart := DayPart(now)
 
@@ -278,7 +282,7 @@ func (p *Processor) save(ctx context.Context, userID int64, username, date, dayP
 func (p *Processor) show(ctx context.Context, chatID int, userID int64) (err error) {
 	defer func() { err = e.WrapIfErr("Ошибка при выполнении команды: show", err) }()
 
-	res, err := p.storage.Show(ctx, userID)
+	res, err := p.storage.Show(ctx, userID, p.userToday(ctx, chatID, userID))
 	if err != nil {
 		_ = p.tg.SendMessage(ctx, chatID, msgError)
 		return err

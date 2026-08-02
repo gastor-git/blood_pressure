@@ -165,3 +165,51 @@ func TestRemoveKeyboard(t *testing.T) {
 		t.Fatalf("RemoveKeyboard() failed: %v", err)
 	}
 }
+
+func TestGetChat(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/"+getChatMethod) {
+			t.Errorf("path = %s, want suffix /%s", r.URL.Path, getChatMethod)
+		}
+		if got := r.URL.Query().Get("chat_id"); got != "42" {
+			t.Errorf("chat_id = %q, want 42", got)
+		}
+
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"id":42,"utc_offset":18000}}`)
+	}))
+
+	info, err := c.GetChat(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetChat() failed: %v", err)
+	}
+	if info == nil {
+		t.Fatal("GetChat() = nil, want info")
+	}
+	if info.ID != 42 {
+		t.Errorf("info.ID = %d, want 42", info.ID)
+	}
+	if info.UTCOffset != 18000 {
+		t.Errorf("info.UTCOffset = %d, want 18000", info.UTCOffset)
+	}
+}
+
+func TestGetChat_OKFalse(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":403,"description":"forbidden"}`)
+	}))
+
+	info, err := c.GetChat(context.Background(), 42)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if info != nil {
+		t.Errorf("GetChat() = %+v, want nil on error", info)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *APIError: %v", err)
+	}
+	if apiErr.Code != 403 || apiErr.Description != "forbidden" {
+		t.Errorf("apiErr = %+v, want 403/forbidden", apiErr)
+	}
+}

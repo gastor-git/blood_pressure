@@ -16,6 +16,7 @@ type Client interface {
 	SendDocument(ctx context.Context, chatID int, filename string, data []byte) error
 	SendKeyboard(ctx context.Context, chatID int, text string, keyboard [][]string, oneTime bool) error
 	RemoveKeyboard(ctx context.Context, chatID int, text string) error
+	GetChat(ctx context.Context, chatID int) (*telegram.ChatFullInfo, error)
 }
 
 type Processor struct {
@@ -29,6 +30,9 @@ type Processor struct {
 	// sessions — активные диалоги ввода показаний по user_id. Как и claimed,
 	// живут в памяти и не требуют мьютекса: консьюмер однопоточный.
 	sessions map[int64]*session
+	// utcOffsets — закэшированные utc_offset пользователей (секунды от UTC)
+	// из getChat; 0 = неизвестно. Как и claimed, без мьютекса.
+	utcOffsets map[int64]int
 }
 
 type Meta struct {
@@ -44,10 +48,11 @@ var (
 
 func New(client Client, storage storage.Storage) *Processor {
 	return &Processor{
-		tg:       client,
-		storage:  storage,
-		claimed:  make(map[int64]bool),
-		sessions: make(map[int64]*session),
+		tg:         client,
+		storage:    storage,
+		claimed:    make(map[int64]bool),
+		sessions:   make(map[int64]*session),
+		utcOffsets: make(map[int64]int),
 	}
 }
 

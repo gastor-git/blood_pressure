@@ -32,10 +32,28 @@ type mockClient struct {
 	removeKeyboardCalled bool
 	removeKeyboardText   string
 	removeErr            error
+
+	getChatCalled int
+	getChatInfo   *tgClient.ChatFullInfo
+	getChatErr    error
 }
 
 func (m *mockClient) Updates(ctx context.Context, offset, limit int) ([]tgClient.Update, error) {
 	return nil, nil
+}
+
+// GetChat по умолчанию возвращает UTCOffset 0 (неизвестно → fallback на
+// серверную таймзону), поэтому старые тесты не ломаются.
+func (m *mockClient) GetChat(ctx context.Context, chatID int) (*tgClient.ChatFullInfo, error) {
+	m.getChatCalled++
+	if m.getChatErr != nil {
+		return nil, m.getChatErr
+	}
+	if m.getChatInfo != nil {
+		return m.getChatInfo, nil
+	}
+
+	return &tgClient.ChatFullInfo{ID: int64(chatID)}, nil
 }
 
 func (m *mockClient) SendMessage(ctx context.Context, chatID int, text string) error {
@@ -83,7 +101,7 @@ type mockStorage struct {
 	saveFunc        func(ctx context.Context, p *storage.Pressure) (bool, error)
 	getFunc         func(ctx context.Context, userID int64, date, dayPart string) (*storage.Pressure, error)
 	updateFunc      func(ctx context.Context, p *storage.Pressure) error
-	showFunc        func(ctx context.Context, userID int64) ([]storage.Pressure, error)
+	showFunc        func(ctx context.Context, userID int64, date string) ([]storage.Pressure, error)
 	getAllFunc      func(ctx context.Context, userID int64) ([]storage.Pressure, error)
 	claimLegacyFunc func(ctx context.Context, userID int64, userName string) error
 	registerUser    func(ctx context.Context, userID int64, chatID int64, userName string) error
@@ -94,11 +112,14 @@ type mockStorage struct {
 	getAllCalls        int
 	claimLegacyCalls   int
 	registerUserCalls  int
+	setUTCOffsetCalls  int
 	registeredUserID   int64
 	registeredChatID   int64
 	registeredUserName string
 	savedPressure      *storage.Pressure
 	updatedPressure    *storage.Pressure
+	setUTCOffsetUserID int64
+	setUTCOffset       int
 }
 
 func (m *mockStorage) Save(ctx context.Context, p *storage.Pressure) (bool, error) {
@@ -127,9 +148,9 @@ func (m *mockStorage) Update(ctx context.Context, p *storage.Pressure) error {
 	return nil
 }
 
-func (m *mockStorage) Show(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+func (m *mockStorage) Show(ctx context.Context, userID int64, date string) ([]storage.Pressure, error) {
 	if m.showFunc != nil {
-		return m.showFunc(ctx, userID)
+		return m.showFunc(ctx, userID, date)
 	}
 	return nil, nil
 }
@@ -161,7 +182,14 @@ func (m *mockStorage) RegisterUser(ctx context.Context, userID int64, chatID int
 	return nil
 }
 
-func (m *mockStorage) UsersWithoutPressure(ctx context.Context, date, dayPart string) ([]storage.User, error) {
+func (m *mockStorage) SetUTCOffset(ctx context.Context, userID int64, offset int) error {
+	m.setUTCOffsetCalls++
+	m.setUTCOffsetUserID = userID
+	m.setUTCOffset = offset
+	return nil
+}
+
+func (m *mockStorage) AllUsers(ctx context.Context) ([]storage.User, error) {
 	return nil, nil
 }
 
@@ -470,7 +498,7 @@ func TestSavePressure_StorageError(t *testing.T) {
 func TestShow_Empty(t *testing.T) {
 	client := &mockClient{}
 	st := &mockStorage{
-		showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+		showFunc: func(ctx context.Context, userID int64, date string) ([]storage.Pressure, error) {
 			return nil, nil
 		},
 	}
@@ -515,7 +543,7 @@ func TestShow_WithData(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			client := &mockClient{}
 			st := &mockStorage{
-				showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+				showFunc: func(ctx context.Context, userID int64, date string) ([]storage.Pressure, error) {
 					return c.show, nil
 				},
 			}
@@ -1009,7 +1037,7 @@ func TestAddDialog_Cancel(t *testing.T) {
 func TestAddDialog_CommandCancelsSession(t *testing.T) {
 	client := &mockClient{}
 	st := &mockStorage{
-		showFunc: func(ctx context.Context, userID int64) ([]storage.Pressure, error) {
+		showFunc: func(ctx context.Context, userID int64, date string) ([]storage.Pressure, error) {
 			return nil, nil
 		},
 	}
@@ -1363,5 +1391,120 @@ func TestDayPartKey(t *testing.T) {
 		if ok != c.ok || got != c.want {
 			t.Errorf("dayPartKey(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// --- персональная таймзона (getChat.utc_offset) ---
+
+func TestEnsureTimezone_CacheOnce(t *testing.T) {
+	client := &mockClient{
+		getChatInfo: &tgClient.ChatFullInfo{ID: 7, UTCOffset: 5 * 3600},
+	}
+	st := &mockStorage{}
+	p := New(client, st)
+	ctx := context.Background()
+
+	p.ensureTimezone(ctx, 42, 7)
+	p.ensureTimezone(ctx, 42, 7)
+	p.ensureTimezone(ctx, 42, 7)
+
+	if client.getChatCalled != 1 {
+		t.Errorf("GetChat called %d times, want 1 (кэш)", client.getChatCalled)
+	}
+	if st.setUTCOffsetCalls != 1 {
+		t.Errorf("SetUTCOffset called %d times, want 1", st.setUTCOffsetCalls)
+	}
+	if st.setUTCOffsetUserID != 7 || st.setUTCOffset != 5*3600 {
+		t.Errorf("SetUTCOffset = %d/%d, want 7/%d", st.setUTCOffsetUserID, st.setUTCOffset, 5*3600)
+	}
+}
+
+func TestEnsureTimezone_ZeroOffsetFallback(t *testing.T) {
+	// offset 0 кэшируется, но в БД не пишется: 0 = неизвестно, fallback на
+	// серверную таймзону.
+	client := &mockClient{}
+	st := &mockStorage{}
+	p := New(client, st)
+	ctx := context.Background()
+
+	p.ensureTimezone(ctx, 42, 7)
+	p.ensureTimezone(ctx, 42, 7)
+
+	if client.getChatCalled != 1 {
+		t.Errorf("GetChat called %d times, want 1 (offset 0 кэшируется)", client.getChatCalled)
+	}
+	if st.setUTCOffsetCalls != 0 {
+		t.Errorf("SetUTCOffset called %d times, want 0", st.setUTCOffsetCalls)
+	}
+}
+
+func TestEnsureTimezone_FallbackOnError(t *testing.T) {
+	client := &mockClient{getChatErr: errors.New("getChat boom")}
+	st := &mockStorage{}
+	p := New(client, st)
+	ctx := context.Background()
+
+	p.ensureTimezone(ctx, 42, 7)
+	if st.setUTCOffsetCalls != 0 {
+		t.Errorf("SetUTCOffset called %d times, want 0", st.setUTCOffsetCalls)
+	}
+
+	// offset не закэширован — повторный вызов снова идёт в GetChat
+	p.ensureTimezone(ctx, 42, 7)
+	if client.getChatCalled != 2 {
+		t.Errorf("GetChat called %d times, want 2 (при ошибке не кэшируем)", client.getChatCalled)
+	}
+}
+
+func TestSavePressure_UserTimezone(t *testing.T) {
+	client := &mockClient{
+		getChatInfo: &tgClient.ChatFullInfo{ID: 7, UTCOffset: 14 * 3600},
+	}
+	st := &mockStorage{
+		saveFunc: func(ctx context.Context, p *storage.Pressure) (bool, error) {
+			return true, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := p.doCmd(context.Background(), "120 80 70", 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	local := time.Now().In(time.FixedZone("", 14*3600))
+	if st.savedPressure.Date != local.Format(timeloc.DateFormat) {
+		t.Errorf("saved date = %q, want %q (локальная дата)", st.savedPressure.Date, local.Format(timeloc.DateFormat))
+	}
+	if st.savedPressure.DayPart != DayPart(local) {
+		t.Errorf("saved dayPart = %q, want %q (локальная часть суток)", st.savedPressure.DayPart, DayPart(local))
+	}
+	if client.getChatCalled != 1 {
+		t.Errorf("GetChat called %d times, want 1", client.getChatCalled)
+	}
+}
+
+func TestShow_UserTimezone(t *testing.T) {
+	client := &mockClient{
+		getChatInfo: &tgClient.ChatFullInfo{ID: 7, UTCOffset: 14 * 3600},
+	}
+	var gotDate string
+	st := &mockStorage{
+		showFunc: func(ctx context.Context, userID int64, date string) ([]storage.Pressure, error) {
+			gotDate = date
+			return nil, nil
+		},
+	}
+	p := New(client, st)
+
+	if err := p.doCmd(context.Background(), ShowCmd, 42, 7, "user"); err != nil {
+		t.Fatalf("doCmd returned error: %v", err)
+	}
+
+	want := time.Now().In(time.FixedZone("", 14*3600)).Format(timeloc.DateFormat)
+	if gotDate != want {
+		t.Errorf("Show date = %q, want %q (локальная дата)", gotDate, want)
+	}
+	if len(client.sentTexts) != 1 || client.sentTexts[0] != msgNoSavedPressure {
+		t.Errorf("sent %v, want [%q]", client.sentTexts, msgNoSavedPressure)
 	}
 }

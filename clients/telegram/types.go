@@ -45,6 +45,33 @@ func (r UpdatesResponse) toError() *APIError {
 	return apiErr
 }
 
+type GetChatResponse struct {
+	Ok          bool                `json:"ok"`
+	ErrorCode   int                 `json:"error_code"`
+	Description string              `json:"description"`
+	Parameters  *ResponseParameters `json:"parameters"`
+	Result      *ChatFullInfo       `json:"result"`
+}
+
+func (r GetChatResponse) toError() *APIError {
+	apiErr := &APIError{
+		Code:        r.ErrorCode,
+		Description: r.Description,
+	}
+	if r.Parameters != nil {
+		apiErr.RetryAfter = r.Parameters.RetryAfter
+	}
+
+	return apiErr
+}
+
+// ChatFullInfo — информация о чате из getChat. utc_offset — смещение часового
+// пояса пользователя в секундах от UTC (0 = неизвестно, только для личных чатов).
+type ChatFullInfo struct {
+	ID        int64 `json:"id"`
+	UTCOffset int   `json:"utc_offset"`
+}
+
 type Update struct {
 	ID      int              `json:"update_id"`
 	Message *IncomingMessage `json:"message"`
