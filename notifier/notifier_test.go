@@ -279,3 +279,46 @@ func TestNextTriggerAll_FallbackOnError(t *testing.T) {
 		t.Errorf("nextTriggerAll() = %v, want %v (fallback серверная ТЗ)", got, want)
 	}
 }
+
+// retryErr — ошибка с рекомендацией паузы (имитация *telegram.APIError).
+type retryErr struct {
+	seconds int
+}
+
+func (e retryErr) Error() string { return "rate limited" }
+
+func (e retryErr) RetryAfter() int { return e.seconds }
+
+func TestRetryAfterDelay(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want time.Duration
+	}{
+		{"без retry_after", errors.New("plain"), 0},
+		{"nil", nil, 0},
+		{"retry_after 3с", retryErr{seconds: 3}, 3 * time.Second},
+		{"retry_after 0 — не нужна", retryErr{seconds: 0}, 0},
+		{"обёрнутая ошибка", fmt.Errorf("wrap: %w", retryErr{seconds: 5}), 5 * time.Second},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := retryAfterDelay(c.err); got != c.want {
+				t.Errorf("retryAfterDelay() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestBackoffPause_CancelledContext(t *testing.T) {
+	// отменённый контекст прерывает ожидание — не должно зависнуть
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	backoffPause(ctx, retryErr{seconds: 30})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("backoffPause() with cancelled ctx took %v, want immediate return", elapsed)
+	}
+}

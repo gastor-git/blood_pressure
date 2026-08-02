@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strconv"
 	"syscall"
 
 	"blood-pressure-bot/cli"
@@ -15,17 +17,21 @@ import (
 	"blood-pressure-bot/storage/sqlite"
 )
 
-const (
-	tgBotHost         = "api.telegram.org"
-	sqliteStoragePath = "data/sqlite/storage.db"
-	batchSize         = 100
+const defaultBatchSize = 100
+
+// Конфигурация через env с дефолтами; при необходимости переопределяется в
+// .env / docker-compose.
+var (
+	tgBotHost         = envOr("BP_TG_HOST", "api.telegram.org")
+	sqliteStoragePath = envOr("BP_DB_PATH", "data/sqlite/storage.db")
+	batchSize         = envIntOr("BP_BATCH_SIZE", defaultBatchSize)
 )
 
 func main() {
-	// CLI-режим: export | delete | help. Запускается без TG_KEY.
+	// CLI-режим: export | delete | backup | health | help. Запускается без TG_KEY.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "export", "delete", "help":
+		case "export", "delete", "backup", "health", "help":
 			os.Exit(runCLI())
 		}
 	}
@@ -48,7 +54,7 @@ func main() {
 		s,
 	)
 
-	log.Print("service started")
+	log.Printf("service started, version=%s, db=%s", buildVersion(), sqliteStoragePath)
 
 	consumer := event_consumer.New(eventsProcessor, eventsProcessor, batchSize)
 
@@ -95,4 +101,44 @@ func mustToken() string {
 	}
 
 	return token
+}
+
+// envOr возвращает значение переменной окружения key или def, если она пуста.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+
+	return def
+}
+
+// envIntOr возвращает целочисленное значение переменной окружения key или def
+// при пустом/невалидном значении.
+func envIntOr(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf("WARN: invalid %s=%q, using default %d", key, v, def)
+		return def
+	}
+
+	return n
+}
+
+// buildVersion возвращает версию сборки из module build info ("(devel)" для
+// локальных сборок, версия тега для опубликованных).
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	if info.Main.Version == "" {
+		return "(devel)"
+	}
+
+	return info.Main.Version
 }

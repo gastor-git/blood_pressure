@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"log"
 
 	"blood-pressure-bot/clients/telegram"
 	"blood-pressure-bot/events"
@@ -19,10 +20,21 @@ type Client interface {
 	GetChat(ctx context.Context, chatID int) (*telegram.ChatFullInfo, error)
 }
 
+// offsetStore — персист offset getUpdates. Объявлен на стороне потребителя;
+// *storage/sqlite.Storage удовлетворяет ему неявно. Опциональный: если
+// хранилище его не реализует, offset остаётся в памяти (как раньше).
+type offsetStore interface {
+	GetOffset(ctx context.Context) (int, error)
+	SetOffset(ctx context.Context, offset int) error
+}
+
 type Processor struct {
 	tg      Client
 	offset  int
 	storage storage.Storage
+	offsets offsetStore
+	// offsetLoaded — персистенный offset уже прочитан (лениво в первом Fetch).
+	offsetLoaded bool
 	// claimed — пользователи, для которых ленивый backfill legacy-записей
 	// уже выполнен за время жизни процесса. Консьюмер однопоточный, поэтому
 	// мьютекс не нужен.
@@ -47,16 +59,28 @@ var (
 )
 
 func New(client Client, storage storage.Storage) *Processor {
-	return &Processor{
+	p := &Processor{
 		tg:         client,
 		storage:    storage,
 		claimed:    make(map[int64]bool),
 		sessions:   make(map[int64]*session),
 		utcOffsets: make(map[int64]int),
 	}
+
+	// Персист offset опционален; загрузка — лениво в первом Fetch (нужен ctx).
+	p.offsets, _ = storage.(offsetStore)
+
+	return p
 }
 
 func (p *Processor) Fetch(ctx context.Context, limit int) ([]events.Event, error) {
+	if !p.offsetLoaded && p.offsets != nil {
+		if offset, err := p.offsets.GetOffset(ctx); err == nil {
+			p.offset = offset
+		}
+		p.offsetLoaded = true
+	}
+
 	updates, err := p.tg.Updates(ctx, p.offset, limit)
 	if err != nil {
 		return nil, e.Wrap("can't get events", err)
@@ -73,6 +97,15 @@ func (p *Processor) Fetch(ctx context.Context, limit int) ([]events.Event, error
 	}
 
 	p.offset = updates[len(updates)-1].ID + 1
+
+	// Подтверждаем offset в БД, чтобы после рестарта Telegram не прислал
+	// уже обработанные события. Сбой записи не прерывает цикл — повтор
+	// записи произойдёт на следующей пачке.
+	if p.offsets != nil {
+		if err := p.offsets.SetOffset(ctx, p.offset); err != nil {
+			log.Printf("[ERR] can't persist updates offset: %s", err.Error())
+		}
+	}
 
 	return res, nil
 }

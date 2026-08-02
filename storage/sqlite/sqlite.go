@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,17 @@ func New(path string) (*Storage, error) {
 // Close закрывает пул соединений.
 func (s *Storage) Close() error {
 	return s.db.Close()
+}
+
+// BackupTo создаёт консистентную копию БД в path через VACUUM INTO.
+// Работает на живом боте (WAL): читающие операции не блокируются, файл
+// назначения не должен существовать (или быть пустым).
+func (s *Storage) BackupTo(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("can't backup database: %w", err)
+	}
+
+	return nil
 }
 
 // Save сохраняет показания. Уникальный индекс (date, day_part, user_id) плюс
@@ -308,4 +320,41 @@ func (s *Storage) SetUTCOffset(ctx context.Context, userID int64, offset int) er
 // Init приводит схему БД к последней версии через механизм миграций.
 func (s *Storage) Init(ctx context.Context) error {
 	return s.migrate(ctx)
+}
+
+// updatesOffsetKey — ключ в таблице meta для персиста offset getUpdates.
+const updatesOffsetKey = "updates_offset"
+
+// GetOffset возвращает последний подтверждённый offset getUpdates из БД.
+// Если offset ещё не сохранялся — (0, nil).
+func (s *Storage) GetOffset(ctx context.Context) (int, error) {
+	q := `SELECT value FROM meta WHERE key = ?`
+
+	var value string
+	err := s.db.QueryRowContext(ctx, q, updatesOffsetKey).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("can't get updates offset: %w", err)
+	}
+
+	offset, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("can't get updates offset: %w", err)
+	}
+
+	return offset, nil
+}
+
+// SetOffset сохраняет offset getUpdates в БД (upsert).
+func (s *Storage) SetOffset(ctx context.Context, offset int) error {
+	q := `INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+
+	if _, err := s.db.ExecContext(ctx, q, updatesOffsetKey, strconv.Itoa(offset)); err != nil {
+		return fmt.Errorf("can't set updates offset: %w", err)
+	}
+
+	return nil
 }

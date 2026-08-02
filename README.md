@@ -8,7 +8,7 @@ Telegram-бот для записи и просмотра показаний а�
 
 | Путь | Назначение |
 |---|---|
-| `main.go` | Сборка зависимостей и старт. Путь к БД, хост API и `batchSize` — константы, **не env**. Первый аргумент `export\|delete\|help` переключает в CLI-режим (`runCLI`), бот запускается без аргументов как раньше и не требует `TG_KEY` для CLI. Рядом с консьюмером в отдельной горутине запускается `notifier` |
+| `main.go` | Сборка зависимостей и старт. Конфигурация через env с дефолтами: `BP_DB_PATH` (путь к БД), `BP_TG_HOST` (хост API), `BP_BATCH_SIZE` (размер пачки). Первый аргумент `export\|delete\|backup\|health\|help` переключает в CLI-режим (`runCLI`), бот запускается без аргументов как раньше и не требует `TG_KEY` для CLI. В лог при старте выводится версия сборки (`buildVersion` из module build info). Рядом с консьюмером в отдельной горутине запускается `notifier` |
 | `clients/telegram/telegram.go` | HTTP-клиент Bot API: `Updates`, `SendMessage`, `SendKeyboard`, `RemoveKeyboard`, `SendDocument`, `GetChat`, `doRequest`. Методы API — константы `getUpdatesMethod` / `sendMessageMethod` / `sendDocumentMethod` / `getChatMethod`. Общие хелперы `do` (выполнение запроса, проверка HTTP-статуса, `sanitize`) и `checkOK` (поле `ok` → `APIError`); multipart-тело `SendDocument` собирает `multipartBody` |
 | `clients/telegram/types.go` | DTO ответов API (`Update`, `IncomingMessage`, `From`, `Chat`, `ChatFullInfo` с `utc_offset`, обёртки `UpdatesResponse` / `GetChatResponse`) + поля ошибок API (`ok`, `error_code`, `description`, `parameters.retry_after`), типизированная `APIError` и её билдеры `toError`; клавиатуры `ReplyKeyboardMarkup` / `ReplyKeyboardRemove` |
 | `events/type.go` | Интерфейсы `Fetcher` / `Processor` (оба принимают `ctx context.Context`), тип `Event` и `Type` |
@@ -22,16 +22,16 @@ Telegram-бот для записи и просмотра показаний а�
 | `consumer/event-consumer/` | Пакет `event_consumer`: цикл fetch → process, завершается по отмене `ctx`; `recover` вокруг обработки каждого события |
 | `notifier/notifier.go` | Рассылка напоминаний в своей горутине: `Notifier`, цикл `Start(ctx)` (таймер + `select` на `ctx.Done()`), `nextTrigger(now, loc)` ({11:30, 17:30, 23:30}), `isReminderMinute`, персональные таймзоны пользователей (`userLoc` по `utc_offset`, fallback `lib/timeloc`), `notify` (получатели — без записи за часть суток их дня). Интерфейсы `Storage` (`AllUsers` + `Get`) / `Sender` — на стороне потребителя |
 | `storage/storage.go` | Интерфейс `Storage` (`Save` / `Get` / `Update` / `Show(ctx, userID, date)` / `GetAll` / `ClaimLegacy` / `RegisterUser` / `SetUTCOffset` / `AllUsers`), модели `Pressure` (ключ — `UserID int64`, `UserName` — отображаемый/аудитный) и `User` (с `UTCOffset`), тип `Filter` — критерии выборки/удаления для CLI (`UserID`/`UserName`/`From`/`To`, все поля опциональны, даты — `DateFormat`) |
-| `storage/sqlite/sqlite.go` | Реализация на SQLite. `New` настраивает пул (`SetMaxOpenConns(1)`) и DSN (`_busy_timeout`, WAL); есть `Close()`. `Save` — `INSERT ... ON CONFLICT DO NOTHING`, признак вставки из `RowsAffected`. `Get` — запись по ключу `(user_id, date, day_part)`, `sql.ErrNoRows` → `(nil, nil)`. `Update` — перезапись значений по тому же ключу, `RowsAffected() == 0` → `sql.ErrNoRows`. `Show(ctx, userID, date)`/`GetAll()` возвращают `[]storage.Pressure` (форматирование — в `events/telegram`). `ExportAll(ctx, filter)`/`Delete(ctx, filter)` — **только на `*Storage`** (не в интерфейсе, не трогает моки и слой бота): динамический `WHERE` через `buildFilterWhere` (значения только через `?`), `ORDER BY user_id, date`, legacy-строки (NULL `user_id`) попадают в выборку; `Delete` возвращает `RowsAffected`. `RegisterUser` — upsert в таблицу `users`. `SetUTCOffset` — сохранение персональной таймзоны. `AllUsers` — все пользователи с `utc_offset` (отбор получателей — в `notifier`). `Init` вызывает механизм миграций |
-| `storage/sqlite/migrations.go` | Механизм миграций: срез `migrations []func(ctx, *sql.Tx) error`, версия схемы — `PRAGMA user_version`; каждая миграция в своей транзакции. `migration3` создаёт таблицу `users`, `migration4` добавляет колонку `utc_offset` |
-| `cli/` | Командная строка для управления БД (`go run . export\|delete\|help`): `cli.go` — `Run(args, store)`, интерфейс `store` (`Init`/`ExportAll`/`Delete`/`Close`) на стороне потребителя, роутинг, общие флаги `-user-id`/`-user-name`/`-from`/`-to` (`parseFilter`/`parseCLIDate` ДД.ММ.ГГГГ→ГГГГ-ММ-ДД, проверка `from <= to`); `export.go` — `formatExportCSV` (BOM+CRLF, шапка `User_ID;User_name;Дата;Утро;День;Вечер`, одна строка на (пользователь, дата), пустые ячейки, `User_ID` для legacy — пустой), файл по умолчанию `export_<сегодня>.csv`, при пустом результате файл не создаётся; `delete.go` — без флага `--yes` отказ, без фильтров — удаление всех записей, вывод «Удалено N записей»; `help.go` — справка. Порядок частей суток — локальная константа `["утро","день","вечер"]`, зависимости на слой бота нет |
+| `storage/sqlite/sqlite.go` | Реализация на SQLite. `New` настраивает пул (`SetMaxOpenConns(1)`) и DSN (`_busy_timeout`, WAL); есть `Close()`. `Save` — `INSERT ... ON CONFLICT DO NOTHING`, признак вставки из `RowsAffected`. `Get` — запись по ключу `(user_id, date, day_part)`, `sql.ErrNoRows` → `(nil, nil)`. `Update` — перезапись значений по тому же ключу, `RowsAffected() == 0` → `sql.ErrNoRows`. `Show(ctx, userID, date)`/`GetAll()` возвращают `[]storage.Pressure` (форматирование — в `events/telegram`). `ExportAll(ctx, filter)`/`Delete(ctx, filter)` — **только на `*Storage`** (не в интерфейсе, не трогает моки и слой бота): динамический `WHERE` через `buildFilterWhere` (значения только через `?`), `ORDER BY user_id, date`, legacy-строки (NULL `user_id`) попадают в выборку; `Delete` возвращает `RowsAffected`. `RegisterUser` — upsert в таблицу `users`. `SetUTCOffset` — сохранение персональной таймзоны. `AllUsers` — все пользователи с `utc_offset` (отбор получателей — в `notifier`). `BackupTo` — консистентная копия БД через `VACUUM INTO` (работает на живом боте). `GetOffset`/`SetOffset` — персист offset `getUpdates` в таблицу `meta` (вне интерфейса `storage.Storage`, используется через опциональный интерфейс `offsetStore`). `Init` вызывает механизм миграций |
+| `storage/sqlite/migrations.go` | Механизм миграций: срез `migrations []func(ctx, *sql.Tx) error`, версия схемы — `PRAGMA user_version`; каждая миграция в своей транзакции. `migration3` создаёт таблицу `users`, `migration4` добавляет колонку `utc_offset`, `migration5` — таблицу `meta` (персист offset `getUpdates`) |
+| `cli/` | Командная строка для управления БД (`go run . export\|delete\|backup\|health\|help`): `cli.go` — `Run(args, store)`, интерфейс `store` (`Init`/`ExportAll`/`Delete`/`BackupTo`/`Close`) на стороне потребителя, роутинг, общие флаги `-user-id`/`-user-name`/`-from`/`-to` (`parseFilter`/`parseCLIDate` ДД.ММ.ГГГГ→ГГГГ-ММ-ДД, проверка `from <= to`); `export.go` — `formatExportCSV` (BOM+CRLF, шапка `User_ID;User_name;Дата;Утро;День;Вечер`, одна строка на (пользователь, дата), пустые ячейки, `User_ID` для legacy — пустой), файл по умолчанию `export_<сегодня>.csv`, при пустом результате файл не создаётся; `delete.go` — без флага `--yes` отказ, без фильтров — удаление всех записей, вывод «Удалено N записей»; `backup.go` — консистентная копия БД через `VACUUM INTO` (`-out`, по умолчанию `backup_<сегодня>.db`); `health.go` — проверка доступности БД для healthcheck контейнера; `help.go` — справка. Порядок частей суток — локальная константа `["утро","день","вечер"]`, зависимости на слой бота нет |
 | `lib/e/e.go` | `Wrap` (nil-safe) / `WrapIfErr` — обёртки над `fmt.Errorf("%w")` |
 | `lib/timeloc/timeloc.go` | Единая таймзона учёта (`Asia/Yekaterinburg`) и форматы даты (`DateFormat`, `CSVDateFormat`, `UserDateFormat`); `time.LoadLocation` — один раз при инициализации пакета |
-| `events/telegram/commands_test.go`, `clients/telegram/telegram_test.go`, `storage/sqlite/sqlite_test.go`, `notifier/notifier_test.go`, `cli/cli_test.go` | Единственные тестовые файлы |
-| `Makefile` | Таргеты `dc_*` для docker compose, `test`, `lint` и `cli_*` (`cli_help`, `cli_export`, `cli_delete`) |
-| `Dockerfile`, `docker-compose.yml` | Сборка и запуск контейнера |
+| `events/telegram/commands_test.go`, `clients/telegram/telegram_test.go`, `storage/sqlite/sqlite_test.go`, `notifier/notifier_test.go`, `cli/cli_test.go`, `consumer/event-consumer/event-consumer_test.go` | Единственные тестовые файлы |
+| `Makefile` | Таргеты `dc_*` для docker compose, `test`, `lint` и `cli_*` (`cli_help`, `cli_export`, `cli_delete`, `cli_backup`, `cli_health`) |
+| `Dockerfile`, `docker-compose.yml` | Сборка и запуск контейнера. В compose — one-shot сервис `db-init` (создаёт `data/sqlite` и назначает владельца 1000:1000 перед стартом `app`), `healthcheck` контейнера через `./blood_pressure health`, ротация логов |
 | `.github/workflows/ci.yml`, `.golangci.yml` | CI в GitHub Actions (тесты и линтер при `push` / `pull_request`) и конфиг golangci-lint |
-| `.env.dist` | Шаблон окружения (`TG_KEY`, `COMPOSE_PROJECT_NAME`); реальный `.env` в `.gitignore` |
+| `.env.dist` | Шаблон окружения (`TG_KEY`, `COMPOSE_PROJECT_NAME`, опциональные `BP_TG_HOST`/`BP_BATCH_SIZE`/`BP_DB_PATH`); реальный `.env` в `.gitignore` |
 | `data/sqlite/` | Каталог БД (`storage.db` + `-wal` / `-shm`), монтируется как volume; в git не попадает (`*.db*`) |
 
 ## Команды сборки и разработки
@@ -68,9 +68,36 @@ make cli_export ARGS="-user-id 7 -out /tmp/export.csv"
 go run . delete -yes                                         # ВНИМАНИЕ: удаляет ВСЕ записи
 make cli_delete ARGS="-yes"
 make cli_delete ARGS="-user-name bob -from 01.01.2026 -to 31.01.2026 -yes"
+go run . backup                                              # копия БД в backup_<сегодня>.db
+go run . backup -out /tmp/backup.db                          # копия в указанный путь
+make cli_backup ARGS="-out /tmp/backup.db"
+go run . health                                              # проверка доступности БД (для healthcheck)
+make cli_health
 ```
 
+Резервное копирование: `backup` создаёт консистентную копию через `VACUUM INTO` и безопасен на живом боте (WAL). Файл назначения не должен существовать; кладите бэкап **вне** каталога `data/sqlite`. Для регулярного копирования запускайте по cron, например: `30 3 * * * cd /путь/к/проекту && go run . backup -out /mnt/backups/backup_$(date +\%F).db`.
+
 Формат CSV: UTF-8 с BOM, разделитель `;`, одна строка на (пользователь, дата), отсутствующие части суток — пустые ячейки. Шапка: `User_ID;User_name;Дата;Утро;День;Вечер`. Для `delete` без `--yes` — отказ с предупреждением; без фильтров команда удаляет все записи. При активном боте (WAL, `_busy_timeout=5000`) возможна задержка записи до 5с; для `delete` безопаснее останавливать бот.
+
+## Конфигурация
+
+Все настройки — через переменные окружения с дефолтами (подходят для docker-compose):
+
+| Переменная | Дефолт | Назначение |
+|---|---|---|
+| `TG_KEY` | — (обязателен для бота) | токен Telegram Bot API, только из окружения |
+| `BP_DB_PATH` | `data/sqlite/storage.db` | путь к файлу БД (для бота и CLI) |
+| `BP_TG_HOST` | `api.telegram.org` | хост Bot API |
+| `BP_BATCH_SIZE` | `100` | размер пачки `getUpdates` |
+
+Путь к БД в `docker-compose.yml` указывать не нужно: дефолт `data/sqlite/storage.db` совпадает с монтируемым volume `/app/data/sqlite`. При активном боте для CLI указывайте тот же путь, что и у бота (например, `BP_DB_PATH=... go run . export`).
+
+## Healthcheck и устойчивость
+
+- `docker-compose.yml` проверяет живучесть контейнера: `healthcheck` выполняет `./blood_pressure health` (открывает БД, работает без `TG_KEY`), при трёх неудачах подряд `restart: unless-stopped` перезапускает контейнер.
+- One-shot сервис `db-init` перед стартом `app` создаёт каталог `data/sqlite` и назначает владельцем uid 1000 — иначе bind-mount, созданный Docker от root, был бы недоступен процессу `USER 1000:1000` из Dockerfile.
+- Offset `getUpdates` персистится в БД (таблица `meta`): после рестарта не приходят дубли уже обработанных событий.
+- При `429` от Telegram консьюмер и notifier ждут `retry_after` (потолок 60с) вместо фиксированной паузы 1с.
 
 - Зависимости ставятся штатным `go mod download`; vendor-каталога нет.
 - **`CGO_ENABLED=0` ломает и сборку, и тесты** — из-за `go-sqlite3`. В Dockerfile статическая линковка сделана через `-tags netgo -ldflags '-extldflags "-static"'`, а не отключением cgo.
@@ -81,7 +108,8 @@ make cli_delete ARGS="-user-name bob -from 01.01.2026 -to 31.01.2026 -yes"
 
 **Поток данных:** `event_consumer.Consumer` → `Fetcher.Fetch` (`*Processor` → `Client.Updates`) → `Processor.Process` → `doCmd` → `storage.Storage`. Параллельно в отдельной горутине работает `notifier` с тем же `storage.Storage` и Telegram-клиентом.
 
-- **Интерфейсы объявляются на стороне потребителя.** `events/telegram.Client` существует ради моков; `*clients/telegram.Client` удовлетворяет ему неявно. **Не заменять поле `tg` на конкретный тип** — это сломает тесты. То же для `notifier.Storage` / `notifier.Sender`.
+- **Интерфейсы объявляются на стороне потребителя.** `events/telegram.Client` существует ради моков; `*clients/telegram.Client` удовлетворяет ему неявно. **Не заменять поле `tg` на конкретный тип** — это сломает тесты. То же для `notifier.Storage` / `notifier.Sender`. Опциональные интерфейсы (например, `offsetStore` с `GetOffset`/`SetOffset` в `events/telegram` для персиста offset `getUpdates`) — тоже на стороне потребителя: `*storage/sqlite.Storage` удовлетворяет неявно, моки — по необходимости.
+- **`retry_after` от Telegram (429).** `*clients/telegram.APIError` сообщает паузу через метод `RetryAfter() int` (поле приватное). Потребители (`event_consumer`, `notifier`) детектируют её через локальный интерфейс `{ RetryAfter() int }` и `errors.As` — без зависимости на конкретный клиент. В консьюмере пауза ограничена сверху (`maxRetryDelay`, 60с).
 - `*Processor` реализует и `events.Fetcher`, и `events.Processor`, поэтому передаётся дважды: `event_consumer.New(eventsProcessor, eventsProcessor, batchSize)`.
 - **Диалог `/add` и подтверждение перезаписи** — state-machine в памяти: `Processor.sessions map[int64]*session` (как `claimed`, без мьютекса: консьюмер однопоточный). Активное состояние перехватывает все не-командные сообщения; любая команда сбрасывает диалог и выполняется как обычно, `/cancel` — отмена с сообщением. При дубликате (быстрый ввод или `/add`) `confirmOverwrite` переиспользует активную сессию или создаёт новую, кладёт в неё отложенные показания (`pendingSys/pendingDia/pendingHr`) и переводит в `stateConfirmOverwrite`; `handleOverwrite` разводит «Перезаписать» → `doOverwrite` (повторная валидация + `storage.Update`) и «Не перезаписывать» → отмена с `msgKeepExisting`. Клавиатуры и их кнопки — только в `messages.go`/`dialog.go`, тексты — только в `messages.go`.
 - `events/telegram.DayPart` и `MsgReminder` — экспортированы, потому что их использует пакет `notifier` (метка части суток и шаблон текста напоминания). `notifier.nextTrigger(now, loc)` строит время через `time.Date(..., loc)` (персональная локация пользователя или `timeloc.Location()`); `notify` опрашивает `AllUsers` + `Get` с датой и частью суток в локали каждого пользователя.

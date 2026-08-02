@@ -51,3 +51,9 @@ cli_export:
 cli_delete:
 	go run . delete $(ARGS)
 
+cli_backup:
+	go run . backup $(ARGS)
+
+cli_health:
+	go run . health
+

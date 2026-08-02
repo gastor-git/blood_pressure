@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -823,4 +824,97 @@ func hasIndex(ctx context.Context, t *testing.T, s *Storage, index string) bool 
 	}
 
 	return name == index
+}
+
+func TestBackupTo(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	p := &storage.Pressure{
+		Date:      today(t),
+		DayPart:   "утро",
+		Systolic:  "120",
+		Diastolic: "80",
+		HeartRate: "70",
+		UserID:    1,
+		UserName:  "user1",
+	}
+	if _, err := s.Save(ctx, p); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	backupPath := filepath.Join(t.TempDir(), "backup.db")
+	if err := s.BackupTo(ctx, backupPath); err != nil {
+		t.Fatalf("BackupTo() failed: %v", err)
+	}
+
+	b, err := New(backupPath)
+	if err != nil {
+		t.Fatalf("New(backup) failed: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	res, err := b.Show(ctx, 1, today(t))
+	if err != nil {
+		t.Fatalf("Show(backup) failed: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("Show(backup) = %+v, want 1 record", res)
+	}
+	if res[0].Systolic != p.Systolic {
+		t.Errorf("backup record systolic = %q, want %q", res[0].Systolic, p.Systolic)
+	}
+
+	// оригинал не тронут
+	orig, err := s.Show(ctx, 1, today(t))
+	if err != nil {
+		t.Fatalf("Show(original) failed: %v", err)
+	}
+	if len(orig) != 1 {
+		t.Errorf("Show(original) = %+v, want 1 record", orig)
+	}
+}
+
+func TestBackupTo_ExistingTarget(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	backupPath := filepath.Join(t.TempDir(), "backup.db")
+	if err := os.WriteFile(backupPath, []byte("not empty"), 0o644); err != nil {
+		t.Fatalf("WriteFile() failed: %v", err)
+	}
+
+	if err := s.BackupTo(ctx, backupPath); err == nil {
+		t.Error("BackupTo() on existing non-empty file = nil, want error")
+	}
+}
+
+func TestGetOffset_DefaultZero(t *testing.T) {
+	s := newTestStorage(t)
+
+	offset, err := s.GetOffset(context.Background())
+	if err != nil {
+		t.Fatalf("GetOffset() failed: %v", err)
+	}
+	if offset != 0 {
+		t.Errorf("GetOffset() = %d, want 0 (no saved offset)", offset)
+	}
+}
+
+func TestSetOffset_GetOffset_RoundTrip(t *testing.T) {
+	s := newTestStorage(t)
+	ctx := context.Background()
+
+	for _, want := range []int{42, 0, 7} {
+		if err := s.SetOffset(ctx, want); err != nil {
+			t.Fatalf("SetOffset(%d) failed: %v", want, err)
+		}
+		got, err := s.GetOffset(ctx)
+		if err != nil {
+			t.Fatalf("GetOffset() failed: %v", err)
+		}
+		if got != want {
+			t.Errorf("GetOffset() = %d, want %d", got, want)
+		}
+	}
 }

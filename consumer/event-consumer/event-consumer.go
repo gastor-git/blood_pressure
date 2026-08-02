@@ -2,14 +2,41 @@ package event_consumer
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
 	"blood-pressure-bot/events"
 )
 
-// errRetryDelay — пауза перед повтором после ошибки Fetch, чтобы не устраивать busy-loop.
+// errRetryDelay — пауза перед повтором после ошибки Fetch, чтобы не устраивать
+// busy-loop.
 const errRetryDelay = 1 * time.Second
+
+// maxRetryDelay — верхний предел паузы, рекомендованной Telegram (retry_after).
+const maxRetryDelay = 60 * time.Second
+
+// retryAfter — ошибка, которая сообщает рекомендованную паузу перед повтором
+// (секунды). Реализуется *telegram.APIError; интерфейс объявлен на стороне
+// потребителя, чтобы не тащить зависимость на конкретный клиент.
+type retryAfter interface {
+	RetryAfter() int
+}
+
+// retryDelay возвращает паузу перед повтором: retry_after из APIError (с
+// верхним пределом) либо errRetryDelay.
+func retryDelay(err error) time.Duration {
+	var ra retryAfter
+	if errors.As(err, &ra) && ra.RetryAfter() > 0 {
+		d := time.Duration(ra.RetryAfter()) * time.Second
+		if d > maxRetryDelay {
+			return maxRetryDelay
+		}
+		return d
+	}
+
+	return errRetryDelay
+}
 
 type Consumer struct {
 	fetcher   events.Fetcher
@@ -42,7 +69,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-time.After(errRetryDelay):
+			case <-time.After(retryDelay(err)):
 			}
 
 			continue

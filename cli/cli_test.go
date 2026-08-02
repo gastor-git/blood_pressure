@@ -14,11 +14,14 @@ import (
 type fakeStore struct {
 	exportAll  func(ctx context.Context, filter storage.Filter) ([]storage.Pressure, error)
 	deleteFunc func(ctx context.Context, filter storage.Filter) (int64, error)
+	backupTo   func(ctx context.Context, path string) error
 	err        error
 
 	initCalls      int
 	exportAllCalls int
 	deleteCalls    int
+	backupCalls    int
+	backupPath     string
 	closeCalls     int
 	lastFilter     storage.Filter
 	deletedCount   int64
@@ -50,6 +53,15 @@ func (f *fakeStore) Delete(ctx context.Context, filter storage.Filter) (int64, e
 func (f *fakeStore) Close() error {
 	f.closeCalls++
 	return nil
+}
+
+func (f *fakeStore) BackupTo(ctx context.Context, path string) error {
+	f.backupCalls++
+	f.backupPath = path
+	if f.backupTo != nil {
+		return f.backupTo(ctx, path)
+	}
+	return f.err
 }
 
 func TestParseCLIDate(t *testing.T) {
@@ -340,5 +352,59 @@ func TestRun_Delete_WithYesAndFilter(t *testing.T) {
 	}
 	if fs.lastFilter.From == nil || *fs.lastFilter.From != "2026-01-01" {
 		t.Errorf("filter.From = %v, want 2026-01-01", fs.lastFilter.From)
+	}
+}
+
+func TestRun_Backup(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "backup.db")
+	fs := &fakeStore{}
+
+	if err := Run([]string{"backup", "-out", out}, fs); err != nil {
+		t.Fatalf("Run(backup) failed: %v", err)
+	}
+	if fs.backupCalls != 1 {
+		t.Errorf("BackupTo called %d times, want 1", fs.backupCalls)
+	}
+	if fs.backupPath != out {
+		t.Errorf("BackupTo path = %q, want %q", fs.backupPath, out)
+	}
+}
+
+func TestRun_Backup_DefaultName(t *testing.T) {
+	fs := &fakeStore{}
+
+	if err := Run([]string{"backup"}, fs); err != nil {
+		t.Fatalf("Run(backup) failed: %v", err)
+	}
+	want := defaultBackupName()
+	if fs.backupPath != want {
+		t.Errorf("BackupTo path = %q, want default %q", fs.backupPath, want)
+	}
+}
+
+func TestRun_Backup_Error(t *testing.T) {
+	fs := &fakeStore{err: errors.New("boom")}
+
+	if err := Run([]string{"backup"}, fs); err == nil {
+		t.Fatal("Run(backup) = nil, want error")
+	}
+}
+
+func TestRun_Health(t *testing.T) {
+	fs := &fakeStore{}
+
+	if err := Run([]string{"health"}, fs); err != nil {
+		t.Fatalf("Run(health) failed: %v", err)
+	}
+	if fs.initCalls != 1 {
+		t.Errorf("Init called %d times, want 1", fs.initCalls)
+	}
+}
+
+func TestRun_Health_Error(t *testing.T) {
+	fs := &fakeStore{err: errors.New("boom")}
+
+	if err := Run([]string{"health"}, fs); err == nil {
+		t.Fatal("Run(health) = nil, want error")
 	}
 }

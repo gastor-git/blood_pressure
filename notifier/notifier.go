@@ -5,6 +5,7 @@ package notifier
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -133,6 +134,38 @@ func (n *Notifier) Start(ctx context.Context) error {
 	}
 }
 
+// retryAfter — ошибка, которая сообщает рекомендованную паузу перед повтором
+// (секунды). Реализуется *telegram.APIError.
+type retryAfter interface {
+	RetryAfter() int
+}
+
+// retryAfterDelay возвращает рекомендованную паузу для ошибки (0 — пауза не
+// нужна).
+func retryAfterDelay(err error) time.Duration {
+	var ra retryAfter
+	if errors.As(err, &ra) && ra.RetryAfter() > 0 {
+		return time.Duration(ra.RetryAfter()) * time.Second
+	}
+
+	return 0
+}
+
+// backoffPause при ошибке отправки с retry_after ждёт рекомендованную паузу,
+// чтобы не спамить Telegram при 429. Возвращает без ожидания, если пауза не
+// нужна или контекст отменён.
+func backoffPause(ctx context.Context, err error) {
+	d := retryAfterDelay(err)
+	if d == 0 {
+		return
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
+	}
+}
+
 // notify рассылает напоминания пользователям, у которых локально наступил
 // триггер и нет записи за текущую часть суток их дня. Сбой отправки или
 // выборки записи одному пользователю не прерывает рассылку.
@@ -166,6 +199,7 @@ func (n *Notifier) notify(ctx context.Context, now time.Time) (err error) {
 
 		if err := n.tg.SendMessage(ctx, int(u.ChatID), fmt.Sprintf(telegram.MsgReminder, label)); err != nil {
 			log.Printf("[ERR] notifier: не удалось отправить напоминание пользователю %d: %s", u.UserID, err.Error())
+			backoffPause(ctx, err)
 		}
 	}
 

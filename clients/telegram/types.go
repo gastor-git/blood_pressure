@@ -21,12 +21,18 @@ type ResponseParameters struct {
 type APIError struct {
 	Code        int
 	Description string
-	RetryAfter  int
+	retryAfter  int
+}
+
+// RetryAfter возвращает рекомендованную Telegram паузу перед повтором
+// (секунды), 0 — пауза не требуется.
+func (e *APIError) RetryAfter() int {
+	return e.retryAfter
 }
 
 func (e *APIError) Error() string {
-	if e.RetryAfter > 0 {
-		return fmt.Sprintf("telegram api error %d: %s (retry after %ds)", e.Code, e.Description, e.RetryAfter)
+	if e.retryAfter > 0 {
+		return fmt.Sprintf("telegram api error %d: %s (retry after %ds)", e.Code, e.Description, e.retryAfter)
 	}
 
 	return fmt.Sprintf("telegram api error %d: %s", e.Code, e.Description)
@@ -39,7 +45,7 @@ func (r UpdatesResponse) toError() *APIError {
 		Description: r.Description,
 	}
 	if r.Parameters != nil {
-		apiErr.RetryAfter = r.Parameters.RetryAfter
+		apiErr.retryAfter = r.Parameters.RetryAfter
 	}
 
 	return apiErr
@@ -59,7 +65,7 @@ func (r GetChatResponse) toError() *APIError {
 		Description: r.Description,
 	}
 	if r.Parameters != nil {
-		apiErr.RetryAfter = r.Parameters.RetryAfter
+		apiErr.retryAfter = r.Parameters.RetryAfter
 	}
 
 	return apiErr

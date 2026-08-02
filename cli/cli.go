@@ -19,14 +19,15 @@ type store interface {
 	Init(ctx context.Context) error
 	ExportAll(ctx context.Context, filter storage.Filter) ([]storage.Pressure, error)
 	Delete(ctx context.Context, filter storage.Filter) (int64, error)
+	BackupTo(ctx context.Context, path string) error
 	Close() error
 }
 
 // ErrUnknownCommand — вызов CLI без известной подкоманды.
 var ErrUnknownCommand = errors.New("неизвестная команда")
 
-// Run маршрутизирует подкоманды CLI: export | delete | help. args — это
-// os.Args[1:], то есть начинается с имени подкоманды.
+// Run маршрутизирует подкоманды CLI: export | delete | backup | health | help.
+// args — это os.Args[1:], то есть начинается с имени подкоманды.
 func Run(args []string, s store) error {
 	if len(args) == 0 {
 		return fmt.Errorf("%w: не указана команда", ErrUnknownCommand)
@@ -37,11 +38,15 @@ func Run(args []string, s store) error {
 		return runExport(args[1:], s)
 	case "delete":
 		return runDelete(args[1:], s)
+	case "backup":
+		return runBackup(args[1:], s)
+	case "health":
+		return runHealth(args[1:], s)
 	case "help":
 		runHelp()
 		return nil
 	default:
-		return fmt.Errorf("%w %q, используйте: export | delete | help", ErrUnknownCommand, args[0])
+		return fmt.Errorf("%w %q, используйте: export | delete | backup | health | help", ErrUnknownCommand, args[0])
 	}
 }
 

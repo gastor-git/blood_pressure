@@ -8,6 +8,8 @@ const helpText = `CLI для управления базой данных пок
 Команды:
   export  выгрузить показания в CSV-файл
   delete  удалить показания (требует --yes)
+  backup  создать консистентную копию БД
+  health  проверить доступность БД (для healthcheck контейнера)
   help    показать эту справку
 
 Общие опции фильтрации (для export и delete):
@@ -26,11 +28,18 @@ delete:
   -yes               обязательное подтверждение удаления. Без него команда
                      отказывает. Без фильтров удаляет ВСЕ записи.
 
+backup:
+  -out PATH          путь к файлу бэкапа (по умолчанию backup_<сегодня>.db).
+                     Файл не должен существовать; бэкап можно делать на живом
+                     боте (VACUUM INTO). Кладите бэкап вне каталога data/sqlite.
+
 Примеры:
   go run . export -user-name alice -from 01.01.2026
   go run . export -user-id 7 -out /tmp/export.csv
   go run . delete -yes
   go run . delete -user-name bob -from 01.01.2026 -to 31.01.2026 -yes
+  go run . backup
+  go run . backup -out /tmp/backup.db
 `
 
 func runHelp() {

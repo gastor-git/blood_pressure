@@ -36,10 +36,12 @@ type mockClient struct {
 	getChatCalled int
 	getChatInfo   *tgClient.ChatFullInfo
 	getChatErr    error
+
+	updates []tgClient.Update
 }
 
 func (m *mockClient) Updates(ctx context.Context, offset, limit int) ([]tgClient.Update, error) {
-	return nil, nil
+	return m.updates, nil
 }
 
 // GetChat по умолчанию возвращает UTCOffset 0 (неизвестно → fallback на
@@ -120,6 +122,25 @@ type mockStorage struct {
 	updatedPressure    *storage.Pressure
 	setUTCOffsetUserID int64
 	setUTCOffset       int
+
+	offset          int
+	setOffsetCalls  int
+	lastSetOffset   int
+	offsetStoreImpl bool
+}
+
+func (m *mockStorage) GetOffset(ctx context.Context) (int, error) {
+	return m.offset, nil
+}
+
+func (m *mockStorage) SetOffset(ctx context.Context, offset int) error {
+	if !m.offsetStoreImpl {
+		return errors.New("offset store disabled")
+	}
+	m.setOffsetCalls++
+	m.lastSetOffset = offset
+	m.offset = offset
+	return nil
 }
 
 func (m *mockStorage) Save(ctx context.Context, p *storage.Pressure) (bool, error) {
@@ -194,6 +215,52 @@ func (m *mockStorage) AllUsers(ctx context.Context) ([]storage.User, error) {
 }
 
 // --- tests ---
+
+func TestFetch_PersistsAndRestoresOffset(t *testing.T) {
+	st := &mockStorage{offsetStoreImpl: true}
+	client := &mockClient{
+		updates: []tgClient.Update{
+			{ID: 10, Message: &tgClient.IncomingMessage{
+				Text: "hello",
+				From: tgClient.From{ID: 1, Username: "u"},
+				Chat: tgClient.Chat{ID: 42},
+			}},
+			{ID: 11, Message: &tgClient.IncomingMessage{
+				Text: "hello",
+				From: tgClient.From{ID: 1, Username: "u"},
+				Chat: tgClient.Chat{ID: 42},
+			}},
+		},
+	}
+
+	p := New(client, st)
+
+	events, err := p.Fetch(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("Fetch() failed: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("Fetch() = %d events, want 2", len(events))
+	}
+	if st.setOffsetCalls != 1 || st.lastSetOffset != 12 {
+		t.Errorf("SetOffset calls = %d, last = %d; want 1/12", st.setOffsetCalls, st.lastSetOffset)
+	}
+
+	// новый процессор (имитация рестарта) подхватывает offset из хранилища
+	p2 := New(client, st)
+	_, err = p2.Fetch(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("second Fetch() failed: %v", err)
+	}
+	if p2.offset != 12 {
+		t.Errorf("restored offset = %d, want 12", p2.offset)
+	}
+	// при повторном Fetch с тем же набором событий новые не должны
+	// подтверждаться заново (offset уже был сохранён)
+	if st.setOffsetCalls != 2 {
+		t.Errorf("SetOffset calls = %d, want 2 (первый + повторный Fetch)", st.setOffsetCalls)
+	}
+}
 
 func TestIsPressure(t *testing.T) {
 	cases := []struct {

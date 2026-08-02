@@ -14,6 +14,7 @@ var migrations = []func(context.Context, *sql.Tx) error{
 	migration2,
 	migration3,
 	migration4,
+	migration5,
 }
 
 // migrate приводит схему к последней версии. Текущая версия хранится в
@@ -127,6 +128,18 @@ func migration4(ctx context.Context, tx *sql.Tx) error {
 
 	if _, err := tx.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("can't add utc_offset column: %w", err)
+	}
+
+	return nil
+}
+
+// migration5 — таблица метаданных key/value: персист offset getUpdates, чтобы
+// при рестарте не получать дубли уже обработанных событий.
+func migration5(ctx context.Context, tx *sql.Tx) error {
+	q := `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`
+
+	if _, err := tx.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("can't create meta table: %w", err)
 	}
 
 	return nil

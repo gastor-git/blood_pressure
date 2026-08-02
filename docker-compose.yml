@@ -1,13 +1,30 @@
 services:
+  db-init:
+    image: busybox:stable
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /app/data/sqlite && chown -R 1000:1000 /app/data/sqlite"]
+    volumes:
+      - ./data/sqlite:/app/data/sqlite
+    restart: "no"
+
   app:
     container_name: blood_pressure
     build: .
     restart: unless-stopped
     init: true
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
     environment:
       TG_KEY: ${TG_KEY}
     volumes:
       - ./data/sqlite:/app/data/sqlite
+    healthcheck:
+      test: ["CMD", "./blood_pressure", "health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     logging:
       driver: json-file
       options:
