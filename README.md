@@ -28,8 +28,9 @@ Telegram-бот для записи и просмотра показаний а�
 | `lib/e/e.go` | `Wrap` (nil-safe) / `WrapIfErr` — обёртки над `fmt.Errorf("%w")` |
 | `lib/timeloc/timeloc.go` | Единая таймзона учёта (`Asia/Yekaterinburg`) и форматы даты (`DateFormat`, `CSVDateFormat`, `UserDateFormat`); `time.LoadLocation` — один раз при инициализации пакета |
 | `events/telegram/commands_test.go`, `clients/telegram/telegram_test.go`, `storage/sqlite/sqlite_test.go`, `notifier/notifier_test.go`, `cli/cli_test.go` | Единственные тестовые файлы |
-| `Makefile` | Таргеты `dc_*` для docker compose, `test` и `cli_*` (`cli_help`, `cli_export`, `cli_delete`) |
+| `Makefile` | Таргеты `dc_*` для docker compose, `test`, `lint` и `cli_*` (`cli_help`, `cli_export`, `cli_delete`) |
 | `Dockerfile`, `docker-compose.yml` | Сборка и запуск контейнера |
+| `.github/workflows/ci.yml`, `.golangci.yml` | CI в GitHub Actions (тесты и линтер при `push` / `pull_request`) и конфиг golangci-lint |
 | `.env.dist` | Шаблон окружения (`TG_KEY`, `COMPOSE_PROJECT_NAME`); реальный `.env` в `.gitignore` |
 | `data/sqlite/` | Каталог БД (`storage.db` + `-wal` / `-shm`), монтируется как volume; в git не попадает (`*.db*`) |
 
@@ -40,6 +41,7 @@ go build ./...                                 # сборка
 go vet ./...                                   # должен быть чистым
 gofmt -l .                                     # должен выводить пустой список
 make test                                      # go test ./... -count=1 -race -cover
+make lint                                      # golangci-lint run ./... (golangci-lint v2)
 go test ./events/telegram -run TestDayPart -v  # один тест
 go test ./notifier -run TestNextTrigger -v     # один тест пакета notifier
 TG_KEY="token" go run .                        # запуск вне Docker
@@ -72,7 +74,7 @@ make cli_delete ARGS="-user-name bob -from 01.01.2026 -to 31.01.2026 -yes"
 
 - Зависимости ставятся штатным `go mod download`; vendor-каталога нет.
 - **`CGO_ENABLED=0` ломает и сборку, и тесты** — из-за `go-sqlite3`. В Dockerfile статическая линковка сделана через `-tags netgo -ldflags '-extldflags "-static"'`, а не отключением cgo.
-- Линтера (`golangci-lint`) и CI в репозитории **нет**. Верификация перед завершением задачи: `go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`.
+- Линтер `golangci-lint` (`make lint`, конфиг — `.golangci.yml`) и CI в GitHub Actions (`.github/workflows/ci.yml`) добавлены; CI прогоняет `go build` / `go vet` / `gofmt` / `make test` и `golangci-lint` при каждом `push` и `pull_request`. Локальная установка линтера: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12` (в CI версия берётся из `ci.yml`).
 - Проект на `go 1.26` (`go.mod`), в Dockerfile — `golang:1.26`; `go-sqlite3` — `v1.14.49`.
 
 ## Стиль кода и конвенции

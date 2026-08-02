@@ -34,6 +34,9 @@ dc_down:
 test:
 	go test ./... -count=1 -race -cover
 
+lint:
+	golangci-lint run ./...
+
 
 ##################
 # CLI
