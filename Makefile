@@ -39,7 +39,12 @@ test:
 # CLI
 ##################
 
-cli_help:   go run . help
-cli_export: go run . export $(ARGS)
-cli_delete: go run . delete $(ARGS)
+cli_help:
+	go run . help
+
+cli_export:
+	go run . export $(ARGS)
+
+cli_delete:
+	go run . delete $(ARGS)
 
