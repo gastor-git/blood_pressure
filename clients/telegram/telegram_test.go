@@ -98,8 +98,8 @@ func TestSendDocument_OKFalse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
 		t.Fatalf("error is not *APIError: %v", err)
 	}
 	if apiErr.Code != 400 || apiErr.Description != "bad request" {
@@ -117,8 +117,8 @@ func TestSendDocument_NonOKStatus(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
 		t.Fatalf("error is not *APIError: %v", err)
 	}
 	if apiErr.Code != 500 {
@@ -205,8 +205,8 @@ func TestGetChat_OKFalse(t *testing.T) {
 	if info != nil {
 		t.Errorf("GetChat() = %+v, want nil on error", info)
 	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
 		t.Fatalf("error is not *APIError: %v", err)
 	}
 	if apiErr.Code != 403 || apiErr.Description != "forbidden" {

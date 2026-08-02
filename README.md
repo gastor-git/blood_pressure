@@ -73,7 +73,7 @@ make cli_delete ARGS="-user-name bob -from 01.01.2026 -to 31.01.2026 -yes"
 - Зависимости ставятся штатным `go mod download`; vendor-каталога нет.
 - **`CGO_ENABLED=0` ломает и сборку, и тесты** — из-за `go-sqlite3`. В Dockerfile статическая линковка сделана через `-tags netgo -ldflags '-extldflags "-static"'`, а не отключением cgo.
 - Линтера (`golangci-lint`) и CI в репозитории **нет**. Верификация перед завершением задачи: `go build ./...` → `go vet ./...` → `gofmt -l .` → `make test`.
-- Локальный тулчейн может быть новее, чем `go 1.25` в `go.mod` — это нормально, версию в `go.mod` не поднимать без запроса.
+- Проект на `go 1.26` (`go.mod`), в Dockerfile — `golang:1.26`; `go-sqlite3` — `v1.14.49`.
 
 ## Стиль кода и конвенции
 

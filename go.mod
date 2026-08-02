@@ -1,5 +1,5 @@
 module blood-pressure-bot
 
-go 1.25
+go 1.26.5
 
-require github.com/mattn/go-sqlite3 v1.14.16
+require github.com/mattn/go-sqlite3 v1.14.49

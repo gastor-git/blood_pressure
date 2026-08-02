@@ -775,7 +775,7 @@ func TestClaimLegacy_CalledOncePerUser(t *testing.T) {
 	p := New(&mockClient{}, st)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := p.doCmd(ctx, HelpCmd, 42, 7, "user"); err != nil {
 			t.Fatalf("doCmd returned error: %v", err)
 		}
