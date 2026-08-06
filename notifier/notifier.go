@@ -31,12 +31,15 @@ type Sender interface {
 type Notifier struct {
 	storage Storage
 	tg      Sender
+	// now — источник текущего времени (переопределяется в тестах).
+	now func() time.Time
 }
 
 func New(storage Storage, tg Sender) *Notifier {
 	return &Notifier{
 		storage: storage,
 		tg:      tg,
+		now:     time.Now,
 	}
 }
 
@@ -93,7 +96,7 @@ func isReminderMinute(t time.Time) bool {
 // списке или ошибке выборки — fallback на серверную таймзону, чтобы цикл не
 // крутился вхолостую.
 func (n *Notifier) nextTriggerAll(ctx context.Context) time.Time {
-	now := time.Now()
+	now := n.now()
 
 	users, err := n.storage.AllUsers(ctx)
 	if err != nil || len(users) == 0 {
@@ -128,7 +131,7 @@ func (n *Notifier) Start(ctx context.Context) error {
 		case <-timer.C:
 		}
 
-		if err := n.notify(ctx, time.Now()); err != nil {
+		if err := n.notify(ctx, n.now()); err != nil {
 			log.Printf("[ERR] notifier: %s", err.Error())
 		}
 	}

@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
+	"blood-pressure-bot/lib/timeloc"
 	"blood-pressure-bot/storage"
 )
 
@@ -30,14 +30,12 @@ func newTestStorage(t *testing.T) *Storage {
 	return s
 }
 
-// today returns the current date in the storage timezone (matches Show's filter).
+// today возвращает текущую дату в таймзоне учёта (совпадает с фильтром Show).
+// Зависит от timeloc.Location(), а не от хардкода — смена таймзоны в проде
+// не ломает тесты.
 func today(t *testing.T) string {
 	t.Helper()
-	loc, err := time.LoadLocation("Asia/Yekaterinburg")
-	if err != nil {
-		t.Fatalf("LoadLocation failed: %v", err)
-	}
-	return time.Now().In(loc).Format("2006-01-02")
+	return timeloc.Today()
 }
 
 func TestInit_Idempotent(t *testing.T) {

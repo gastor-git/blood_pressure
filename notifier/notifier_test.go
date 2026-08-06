@@ -171,15 +171,19 @@ func TestNotify(t *testing.T) {
 }
 
 func TestNotify_PerUserTimezones(t *testing.T) {
-	// 12:30 UTC = 17:30 в серверной таймзоне (UTC+5) — триггер дня.
-	now := time.Date(2026, 1, 2, 12, 30, 0, 0, time.UTC)
+	// 17:30 в серверной таймзоне — триггер дня для fallback-пользователя
+	// (offset 0). Сдвиги остальных пользователей задаются относительно
+	// серверной таймзоны, поэтому тест не зависит от фактической ТЗ прода.
+	local := time.Date(2026, 1, 2, 17, 30, 0, 0, timeloc.Location())
+	_, serverOff := local.Zone()
+	now := local.UTC()
 
 	st := &mockStorage{
 		users: []storage.User{
-			{UserID: 1, ChatID: 100, UserName: "ekb-fallback"},                     // offset 0 → 17:30 — день
-			{UserID: 2, ChatID: 200, UserName: "far-east", UTCOffset: 14 * 3600},   // 02:30 следующего дня — не триггер
-			{UserID: 3, ChatID: 300, UserName: "west", UTCOffset: -12 * 3600},      // 00:30 — не триггер
-			{UserID: 4, ChatID: 400, UserName: "kiritimati", UTCOffset: 11 * 3600}, // 23:30 — вечер
+			{UserID: 1, ChatID: 100, UserName: "ekb-fallback"},                              // offset 0 → серверная ТЗ: 17:30 — день
+			{UserID: 2, ChatID: 200, UserName: "far-east", UTCOffset: serverOff + 9*3600},   // 02:30 следующего дня — не триггер
+			{UserID: 3, ChatID: 300, UserName: "west", UTCOffset: serverOff - 17*3600},      // 00:30 — не триггер
+			{UserID: 4, ChatID: 400, UserName: "kiritimati", UTCOffset: serverOff + 6*3600}, // 23:30 — вечер
 		},
 	}
 	sender := &mockSender{}
@@ -272,10 +276,14 @@ func TestNextTriggerAll_FallbackOnError(t *testing.T) {
 	st := &mockStorage{err: errors.New("boom")}
 	n := New(st, &mockSender{})
 
-	got := n.nextTriggerAll(context.Background())
+	// фиксируем часы, чтобы не флакать на границе срабатывания 11:30/17:30/23:30
+	fixed := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	n.now = func() time.Time { return fixed }
+
 	// при ошибке — ближайший триггер в серверной таймзоне
-	want := nextTrigger(time.Now(), timeloc.Location())
-	if got.Unix() != want.Unix() {
+	got := n.nextTriggerAll(context.Background())
+	want := nextTrigger(fixed, timeloc.Location())
+	if !got.Equal(want) {
 		t.Errorf("nextTriggerAll() = %v, want %v (fallback серверная ТЗ)", got, want)
 	}
 }
